@@ -22,9 +22,11 @@ use super::rng::Rng;
 mod draw;
 mod ending;
 mod setup;
+mod sprite;
 mod stage;
 pub use draw::*;
 pub use ending::*;
+pub use sprite::*;
 pub use stage::*;
 
 pub const SLOTS: usize = 64;
@@ -510,6 +512,8 @@ pub struct Satellite {
     pub col: u16,
     pub row: u16,
     pub flags: u8,
+    /// Screen x (+$0A, from `sub_5552` while it follows the pivot) and y (16.16).
+    pub x: u16,
     pub y: u32,
     pub anim: Anim,
     pub fall: Fall,
@@ -541,6 +545,10 @@ impl EffectState {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Effect {
     pub player: u8,
+    /// The landed bean's color (+$08), frame (+$09) and x (+$0A): same slot, same sprite.
+    pub color: u8,
+    pub frame: u8,
+    pub x: u16,
     pub state: EffectState,
     pub delay: u16,
     pub steps_left: u8,
@@ -549,8 +557,10 @@ pub struct Effect {
 }
 
 impl Effect {
-    fn new(player: u8, y: u32) -> Effect {
-        Effect { player, state: EffectState::Wait, delay: 0x18, steps_left: 0, ticks: 0, y }
+    fn new(player: u8, y: u32, color: BeanColor, frame: u8, x: u16) -> Effect {
+        // loc_4FC0: frame 7 (the landed bean's shine).
+        let _ = frame;
+        Effect { player, color: color as u8, frame: 7, x, state: EffectState::Wait, delay: 0x18, steps_left: 0, ticks: 0, y }
     }
 }
 
@@ -1846,6 +1856,7 @@ impl Engine {
             col: 0,
             row: 0,
             flags: 0,
+            x: 0,
             y: 0,
             anim: Anim::new(script::NONE),
             fall: Fall::default(),
@@ -1944,7 +1955,8 @@ impl Engine {
                         p.flags &= !flag::PIVOT_ACTIVE;
                     }
                     self.mark(id, v.pair.col, v.pair.row, v.color);
-                    return Ok(Some(Actor::Effect(Effect::new(id as u8, v.y))));
+                    let x = pivot_x(&v);
+                    return Ok(Some(Actor::Effect(Effect::new(id as u8, v.y, v.color, v.pair.pivot_anim.frame, x))));
                 }
             }
         }
@@ -2001,7 +2013,7 @@ impl Engine {
                     }
                     let id = s.player_id as usize & 1;
                     self.mark(id, s.col, s.row, s.color);
-                    return Ok(Some(Actor::Effect(Effect::new(id as u8, s.y))));
+                    return Ok(Some(Actor::Effect(Effect::new(id as u8, s.y, s.color, s.anim.frame, s.x))));
                 }
             }
         }
@@ -2009,10 +2021,13 @@ impl Engine {
     }
 
     /// `sub_5552` (y only): 16 px from the pivot on the satellite's side.
+    /// `sub_5552`: the satellite circles the pivot (16 pixels out, at its angle).
     fn follow(&mut self, s: &mut Satellite) {
         let pivot = self.pivot_mut(s.pivot_slot);
-        let (_, dr) = DIR[(pivot.pair.sat_angle >> 6) as usize & 3];
-        let y = ((pivot.y >> 16) as u16).wrapping_add((dr * 16) as u16);
+        let angle = pivot.pair.sat_angle;
+        let (px, py) = (pivot_x(pivot), (pivot.y >> 16) as u16);
+        s.x = px.wrapping_add((sin(angle, 0x1000) >> 16) as u16);
+        let y = py.wrapping_sub((cos(angle, 0x1000) >> 16) as u16);
         s.y = (u32::from(y) << 16) | (s.y & 0xFFFF);
     }
 
@@ -2047,6 +2062,7 @@ impl Engine {
                 e.ticks += 1;
                 if e.ticks >= 4 {
                     e.ticks = 0;
+                    e.x = e.x.wrapping_sub(1);
                     e.y = e.y.wrapping_sub(0x1_0000);
                     e.steps_left -= 1;
                     if e.steps_left == 0 {

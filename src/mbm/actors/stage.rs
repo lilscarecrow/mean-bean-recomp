@@ -31,6 +31,9 @@ pub struct PreviewBean {
     pub last: u8,
     pub draw: u8,
     pub anim: Anim,
+    /// Where it is drawn (+$0A, +$0E; set when spawned).
+    pub x: u16,
+    pub y: u16,
 }
 
 pub const PREVIEW_BEAN_CODE: u32 = 0x45EA;
@@ -589,6 +592,8 @@ impl Engine {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BgSlide {
     pub draw: u8,
+    /// +$09: its sprite frame (from the spawn table).
+    pub frame: u8,
     /// +$22 steps left of this hop, +$26 pause before it, +$28 place (byte offset into
     /// `unk_690A`), +$2A/+$2C step per frame, +$32 pause index (`unk_6902`, 8 long).
     pub steps: u8,

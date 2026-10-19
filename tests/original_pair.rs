@@ -274,3 +274,38 @@ fn cpu_pair_matches_the_original_every_frame() {
     }
     eprintln!("{checked} CPU frames identical ({draws} with pad random draws, {lag} lag frames skipped); {cover:?}");
 }
+
+/// `ReadController` against RAM: P1's recorded hold byte, read through `Pad`, gives the
+/// same press and auto-repeat bytes and repeat timers every frame.
+#[test]
+fn pad_reading_matches_the_original() {
+    use bean_machine::mbm::pad::Pad;
+    let mut checked = 0;
+    for path in recordings() {
+        let mut pad: Option<Pad> = None;
+        let mut times = (0, 0);
+        for ram in frames(&path) {
+            let rom_pad = Pad {
+                hold: ram.u8(P1_CTRL),
+                press: ram.u8(P1_CTRL + 1),
+                repeat: ram.u8(P1_CTRL + 2),
+                horizontal: ram.u8(P1_CTRL + 3),
+                vertical: ram.u8(P1_CTRL + 4),
+            };
+            if let Some(mut ours) = pad {
+                // The pads are read before the game flow runs, which may change the
+                // repeat times: the previous frame's apply.
+                ours.read(rom_pad.hold, times.0, times.1);
+                if ours == rom_pad {
+                    checked += 1;
+                } else if pad != Some(rom_pad) {
+                    // (frames where the game didn't read the pads leave them as they were)
+                    panic!("{}: ours {ours:?}, ROM {rom_pad:?}", path.display());
+                }
+            }
+            pad = Some(rom_pad);
+            times = (ram.u8(0xFF_1108), ram.u8(0xFF_1109));
+        }
+    }
+    eprintln!("{checked} pad reads identical");
+}

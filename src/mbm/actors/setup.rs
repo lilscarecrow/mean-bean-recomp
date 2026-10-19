@@ -14,7 +14,7 @@ const LEVEL_SPEED_STEPS: u32 = 0x3F84;
 /// `word_5BAE`: the referee's place and intro by mode (x, y, script).
 const REFEREE_START: [(u16, u16, u32); 4] = [(0x140, 0x128, 0x3316), (0x120, 0x108, 0x3316), (0x120, 0x10C, 0x3330), (0x120, 0x108, 0x3330)];
 /// `word_45CA`: where each side's next-pair preview sits.
-const PREVIEW_AT: [(u16, u16); 2] = [(0x108, 0xC6), (0x138, 0xC6)];
+pub(super) const PREVIEW_AT: [(u16, u16); 2] = [(0x108, 0xC6), (0x138, 0xC6)];
 /// `unk_690A`: Frankly's six hoppers (x, y, dx, dy, frame, place).
 const FRANKLY_HOPPERS: u32 = 0x690A;
 
@@ -159,8 +159,8 @@ impl Engine {
         let (x, y) = PREVIEW_AT[usize::from(p.id & 1)];
         for index in 0..2u8 {
             let Some(bean) = self.find_actor_slot() else { return };
-            let _ = (x, y.wrapping_sub(u16::from(index) * 0x10)); // where it's drawn
-            let preview = PreviewBean { holder_slot: slot, index, color: 0, last: 0xFF, draw: 0x80, anim: Anim::new(0) };
+            let y = y.wrapping_sub(u16::from(index) * 0x10);
+            let preview = PreviewBean { holder_slot: slot, index, color: 0, last: 0xFF, draw: 0x80, anim: Anim::new(0), x, y };
             self.slots[bean] = Some(Actor::PreviewBean(preview));
         }
     }
@@ -203,6 +203,7 @@ impl Engine {
                     let at = FRANKLY_HOPPERS + i * 10;
                     let hopper = BgSlide {
                         draw: 0,
+                        frame: rom::byte(at + 8),
                         steps: 0,
                         pause: 0,
                         place: rom::byte(at + 9),

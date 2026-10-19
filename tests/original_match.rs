@@ -90,6 +90,26 @@ fn globals_from(ram: &Ram) -> Engine {
     e
 }
 
+/// What `DrawActors` reads of each actor (draw flags, mapping list, frame, x, y) must
+/// be the ROM's, for every actor that is drawn (bit 7 of +$06) in either.
+fn draws_match(e: &Engine, ram: &Ram) -> Result<(), String> {
+    for slot in 0..SLOTS {
+        let Some(ours) = e.draw_of(slot) else { continue };
+        let a = slot_addr(slot);
+        let rom = Draw { flags: ram.u8(a + 6), mappings: ram.u8(a + 8), frame: ram.u8(a + 9), x: ram.u16(a + 0x0A), y: ram.u16(a + 0x0E) };
+        if !ours.shown() && !rom.shown() {
+            continue;
+        }
+        if ours != rom {
+            let what = e.slots[slot].as_ref().map(|a| format!("{:X}", a.code().unwrap_or(0))).unwrap_or_default();
+            return Err(format!("slot {slot:X} (${what}) draws
+  ROM {rom:X?}
+  our {ours:X?}"));
+        }
+    }
+    Ok(())
+}
+
 /// Everything the engine models, compared with the ROM's RAM.
 fn mismatch(e: &Engine, ram: &Ram) -> Option<String> {
     mismatch_except(e, ram, None)
@@ -202,9 +222,9 @@ fn ram_says_bytecode_runs(ram: &Ram) -> bool {
 /// Runs one match from `start`. Ok(reason it stopped) or Err(first mismatch).
 fn run_match(all: &[Ram], start: usize, poked: &std::collections::HashSet<usize>, run: &mut Run) -> Result<String, String> {
     match engine_from(&all[start]) {
-        Ok(engine) => run_from(all, start, engine, poked, run, &mut |_, e| {
+        Ok(engine) => run_from(all, start, engine, poked, run, &mut |f, e, ram| {
             e.plane_writes.clear();
-            Ok(())
+            draws_match(e, ram).map_err(|m| format!("frame {f}: {m}"))
         }),
         Err(e) => Ok(format!("at the start: {e}")),
     }
@@ -217,7 +237,7 @@ fn run_from(
     mut engine: Engine,
     poked: &std::collections::HashSet<usize>,
     run: &mut Run,
-    on_frame: &mut dyn FnMut(usize, &mut Engine) -> Result<(), String>,
+    on_frame: &mut dyn FnMut(usize, &mut Engine, &Ram) -> Result<(), String>,
 ) -> Result<String, String> {
     let mut finishing: Option<usize> = None;
     for f in start + 1..all.len() {
@@ -236,7 +256,7 @@ fn run_from(
                 return Err(format!("frame {f}, finishing a split frame at slot {cut:X}: {m}"));
             }
             run.frames += 1;
-            on_frame(f, &mut engine)?;
+            on_frame(f, &mut engine, cur)?;
             continue;
         }
         if prev.bytes(0xFF_E000, 0x1000) == cur.bytes(0xFF_E000, 0x1000) {
@@ -246,7 +266,7 @@ fn run_from(
                 return Err(format!("frame {f} (lag frame): {m}"));
             }
             run.lag += 1;
-            on_frame(f, &mut engine)?;
+            on_frame(f, &mut engine, cur)?;
             continue;
         }
         let before = engine.clone();
@@ -278,7 +298,7 @@ fn run_from(
         run.pieces += count_pairs(&engine).saturating_sub(pieces_before);
         run.frames += 1;
         if finishing.is_none() {
-            on_frame(f, &mut engine)?;
+            on_frame(f, &mut engine, cur)?;
         }
         if engine.match_over {
             run.finished += 1;
@@ -431,9 +451,9 @@ fn matches_start_from_the_settings_alone() {
             if let Some(m) = mismatch(&e, &all[f]) {
                 panic!("{}", fail(f, "loc_6070", m));
             }
-            let mut drain = |_: usize, e: &mut Engine| {
+            let mut drain = |f: usize, e: &mut Engine, ram: &Ram| {
                 e.plane_writes.clear();
-                Ok(())
+                draws_match(e, ram).map_err(|m| format!("frame {f}: {m}"))
             };
             match run_from(&all, f, e, &poked, &mut run, &mut drain) {
                 Ok(why) => {
@@ -488,7 +508,7 @@ fn field_planes_match_vdp_snapshots() {
         let Ok(engine) = engine_from(&all[start]) else { continue };
         let mut vram: Vram = screen::match_vram(&rom, &src, engine.opponent).unwrap();
         planes::match_planes(&rom, &mut vram).unwrap();
-        let mut check = |f: usize, e: &mut Engine| -> Result<(), String> {
+        let mut check = |f: usize, e: &mut Engine, _: &Ram| -> Result<(), String> {
             for (at, w) in e.plane_writes.drain(..) {
                 vram.load(at, &w.to_be_bytes());
             }

@@ -232,6 +232,7 @@ pub fn load(ram: &Ram, slot: usize, tag: u8) -> Option<Actor> {
             col: ram.u16(a + 0x1A),
             row: ram.u16(a + 0x1C),
             flags: ram.u8(a + 7),
+            x: ram.u16(a + 0x0A),
             y: ram.u32(a + 0x0E),
             anim: anim_from(ram, a),
             fall: fall_from(ram, a),
@@ -291,6 +292,9 @@ pub fn load(ram: &Ram, slot: usize, tag: u8) -> Option<Actor> {
     effect_state.map(|state| {
         Actor::Effect(Effect {
             player: ram.u8(a + 0x2A),
+            color: ram.u8(a + 8),
+            frame: ram.u8(a + 9),
+            x: ram.u16(a + 0x0A),
             state,
             delay: ram.u16(a + 0x24),
             steps_left: ram.u8(a + 0x26),
@@ -329,6 +333,8 @@ fn load_stage(ram: &Ram, a: u32, code: u32) -> Option<Actor> {
             last: ram.u8(a + 0x36),
             draw: ram.u8(a + 6),
             anim: anim_from(ram, a),
+            x: ram.u16(a + 0x0A),
+            y: ram.u16(a + 0x0E),
         }),
         0x5BCE | 0x5BF8 | 0x5C62 => {
             Actor::Referee(Referee {
@@ -427,6 +433,7 @@ fn load_stage(ram: &Ram, a: u32, code: u32) -> Option<Actor> {
         }),
         BG_SLIDE_CODE => Actor::BgSlide(BgSlide {
             draw: ram.u8(a + 6),
+            frame: ram.u8(a + 9),
             steps: ram.u8(a + 0x22),
             pause: ram.u8(a + 0x26),
             place: ram.u8(a + 0x28),
