@@ -111,6 +111,7 @@ pub enum Actor {
     BgRunner(BgRunner),
     BgSpark(BgSpark),
     ShakeField(ShakeField),
+    NameEntry(NameEntry),
 }
 
 impl Actor {
@@ -171,6 +172,7 @@ impl Actor {
             Actor::BgRunner(_) => Some(BG_RUNNER_CODE),
             Actor::BgSpark(_) => Some(BG_SPARK_CODE),
             Actor::ShakeField(_) => Some(SHAKE_FIELD_CODE),
+            Actor::NameEntry(n) => Some(n.state.code()),
         }
     }
 }
@@ -1124,6 +1126,7 @@ impl Engine {
                 Actor::BgRunner(r) => self.run_bg_runner(r).map(Actor::BgRunner),
                 Actor::BgSpark(sp) => self.run_bg_spark(sp).map(Actor::BgSpark),
                 Actor::ShakeField(sh) => self.run_shake_field(sh).map(Actor::ShakeField),
+                Actor::NameEntry(n) => self.run_name_entry(n, inputs).map(Actor::NameEntry),
             };
             self.slots[slot] = next;
         }

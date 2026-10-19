@@ -280,7 +280,12 @@ fn whole_matches_run_on_the_engine_alone() {
         let all: Vec<Ram> = frames(&path).collect();
         for f in 0..all.len() {
             let waiting = |r: &Ram| [P1, P2].iter().all(|&t| r.player_actor(t).is_some_and(|a| r.code(a) == PLAYER_WAITING));
-            if !waiting(&all[f]) || (f > 0 && waiting(&all[f - 1])) || poked.contains(&f) {
+            // Also a recording that starts in the middle of a match (from a savestate),
+            // when everything in it is ported.
+            let mid_match = f == 0
+                && !waiting(&all[0])
+                && engine_from(&all[0]).is_ok_and(|e| e.slots.iter().any(|s| matches!(s, Some(Actor::Player(_)))));
+            if !mid_match && (!waiting(&all[f]) || (f > 0 && waiting(&all[f - 1])) || poked.contains(&f)) {
                 continue;
             }
             matches += 1;

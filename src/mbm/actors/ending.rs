@@ -357,8 +357,8 @@ impl Engine {
             }
             HighScore => {
                 self.high_score_table = self.level_mode;
-                if self.enter_high_score(p) {
-                    return Err(Unported("high score name entry (sub_BFA6)"));
+                if let Some(rank) = self.enter_high_score(p) {
+                    self.spawn_name_entry(p, rank);
                 }
                 p.state = ContinueCheck;
             }
@@ -390,14 +390,14 @@ impl Engine {
 
     /// `sub_C438`: put the score in the high score table of `high_score_table` if it
     /// beats an entry (scores at +6, beans at +$0A, a new entry marked $FF at +0).
-    fn enter_high_score(&mut self, p: &Player) -> bool {
+    fn enter_high_score(&mut self, p: &Player) -> Option<u16> {
         let table = usize::from(self.high_score_table);
         if table >= 4 {
-            return false;
+            return None;
         }
         let base = table * 0x50;
         let entry = |hs: &[u8], i: usize| u32::from_be_bytes(hs[base + i * 0x10 + 6..base + i * 0x10 + 10].try_into().unwrap());
-        let Some(rank) = (0..5).find(|&i| entry(&self.high_scores, i) < p.score) else { return false };
+        let rank = (0..5).find(|&i| entry(&self.high_scores, i) < p.score)?;
         // Move the lower entries down one (the last falls off).
         for i in (rank..4).rev() {
             let (from, to) = (base + i * 0x10, base + (i + 1) * 0x10);
@@ -407,7 +407,84 @@ impl Engine {
         self.high_scores[at] = 0xFF;
         self.high_scores[at + 6..at + 10].copy_from_slice(&p.score.to_be_bytes());
         self.high_scores[at + 0x0A..at + 0x0C].copy_from_slice(&p.beans_total.to_be_bytes());
-        true
+        Some(rank as u16)
+    }
+
+    /// `sub_BFA6`: enter a name for the new high score; the player waits on flag bit 1.
+    fn spawn_name_entry(&mut self, p: &mut Player, rank: u16) {
+        let Some(slot) = self.find_actor_slot() else { return };
+        p.flags = 3;
+        let entry = NameEntry {
+            state: NameEntryState::Start,
+            parent: self.current_slot,
+            player_id: p.id,
+            rank,
+            timeout: 0x780,
+            cursor: 0,
+            letters: [0; 5],
+            blink: 0,
+            delay: 0,
+        };
+        self.slots[slot] = Some(Actor::NameEntry(entry));
+    }
+
+    pub(super) fn run_name_entry(&mut self, mut n: NameEntry, inputs: &Inputs) -> Option<NameEntry> {
+        match n.state {
+            NameEntryState::Start => n.state = NameEntryState::Clear, // draws the prompt
+            NameEntryState::Clear => {
+                n.letters = [1; 5]; // "A"
+                n.state = NameEntryState::Edit;
+            }
+            NameEntryState::Edit => {
+                n.blink = n.blink.wrapping_add(1);
+                let pad = inputs.pads[usize::from(n.player_id & 1)];
+                let at = usize::from(n.cursor).min(4);
+                if pad.press & 0x04 != 0 {
+                    n.cursor = n.cursor.saturating_sub(1); // left: back a letter
+                } else if pad.press & 0x70 != 0 {
+                    n.cursor += 1;
+                    if n.cursor >= 3 {
+                        self.save_name(&n);
+                        n.timeout = 0;
+                        n.delay = 0x20;
+                        n.state = NameEntryState::Shown;
+                    }
+                } else if pad.repeat & 0x02 != 0 {
+                    n.letters[at] = if n.letters[at] + 1 >= 0x1B { 0 } else { n.letters[at] + 1 };
+                    n.blink = 0;
+                } else if pad.repeat & 0x01 != 0 {
+                    n.letters[at] = if n.letters[at] == 0 || n.letters[at] & 0x80 != 0 { 0x1A } else { n.letters[at] - 1 };
+                    n.blink = 0;
+                }
+            }
+            NameEntryState::Shown => {
+                if wait(&mut n.delay) {
+                    n.state = NameEntryState::Done;
+                }
+            }
+            NameEntryState::Done => {
+                if let Some(Actor::Player(p)) = self.slots[n.parent].as_mut() {
+                    p.flags &= !2;
+                }
+                return None;
+            }
+        }
+        Some(n)
+    }
+
+    /// `loc_C0F8` + `sub_C420`: the name goes into the entry holding the score.
+    fn save_name(&mut self, n: &NameEntry) {
+        let Some(Actor::Player(p)) = &self.slots[n.parent] else { return };
+        let score = p.score;
+        let base = usize::from(self.high_score_table) * 0x50;
+        for rank in usize::from(n.rank)..5 {
+            let at = base + rank * 0x10;
+            if self.high_scores[at + 6..at + 10] == score.to_be_bytes() {
+                self.high_scores[at..at + 3].copy_from_slice(&n.letters[..3]);
+                self.high_scores[at + 3] = 0xFF;
+                return; // (sub_23536 then backs up the save block: not modelled)
+            }
+        }
     }
 
     pub(super) fn run_continue_sign(&mut self, mut c: ContinueSign) -> Option<ContinueSign> {
@@ -720,6 +797,47 @@ pub struct BounceSparkle {
 
 pub const BOUNCE_SPARKLE_CODE: u32 = 0x84D6;
 const BOUNCE_SPARKLE_SCRIPT: u32 = 0x84F4;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NameEntryState {
+    /// $C00A: draw the prompt; $C04C: every letter "A".
+    Start,
+    Clear,
+    /// $C060: up/down change the letter, A/B/C next, left back.
+    Edit,
+    /// $C138: show the name for $20 frames; $C146: let the player go.
+    Shown,
+    Done,
+}
+
+impl NameEntryState {
+    pub fn code(self) -> u32 {
+        match self {
+            NameEntryState::Start => 0xC00A,
+            NameEntryState::Clear => 0xC04C,
+            NameEntryState::Edit => 0xC060,
+            NameEntryState::Shown => 0xC138,
+            NameEntryState::Done => 0xC146,
+        }
+    }
+}
+
+/// `loc_C00A` (`sub_BFA6`): three letters for a new high score.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NameEntry {
+    pub state: NameEntryState,
+    /// +$2E the player (it waits on flag bit 1), +$2A its id.
+    pub parent: usize,
+    pub player_id: u8,
+    /// +$0A the rank, +$28 a timeout nobody counts here, +$0E the letter being edited,
+    /// +$12.. the letters (0 blank, 1-26 A-Z), +$26 the cursor blink, +$24 delay.
+    pub rank: u16,
+    pub timeout: u16,
+    pub cursor: u16,
+    pub letters: [u8; 5],
+    pub blink: u8,
+    pub delay: u16,
+}
 
 /// `ActorBookmark_Ctrl`: a wait any button press ends.
 fn bookmark_ctrl(delay: &mut u16, press: bool) -> bool {

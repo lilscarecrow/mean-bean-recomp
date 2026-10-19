@@ -453,6 +453,20 @@ fn load_stage(ram: &Ram, a: u32, code: u32) -> Option<Actor> {
             x: ram.u16(a + 0x0A),
             y: ram.u16(a + 0x0E),
         }),
+        0xC00A | 0xC04C | 0xC060 | 0xC138 | 0xC146 => Actor::NameEntry(NameEntry {
+            state: [NameEntryState::Start, NameEntryState::Clear, NameEntryState::Edit, NameEntryState::Shown, NameEntryState::Done]
+                .into_iter()
+                .find(|s| s.code() == code)
+                .unwrap(),
+            parent: slot_of(ram.u32(a + 0x2E)),
+            player_id: ram.u8(a + 0x2A),
+            rank: ram.u16(a + 0x0A),
+            timeout: ram.u16(a + 0x28),
+            cursor: ram.u16(a + 0x0E),
+            letters: ram.bytes(a + 0x12, 5).try_into().unwrap(),
+            blink: ram.u8(a + 0x26),
+            delay: ram.u16(a + 0x24),
+        }),
         SHAKE_FIELD_CODE => Actor::ShakeField(ShakeField {
             angle: ram.u8(a + 0x36),
             strength: ram.u16(a + 0x38),
@@ -586,6 +600,10 @@ pub fn describe(actor: &Actor) -> String {
             if r.level & 3 == 2 { r.anim } else { Anim { ptr: 0, ..r.anim } }
         ),
         Actor::BgSpark(sp) => format!("bg spark frame {} left {} step {:X},{:X} at {:X},{:X}", sp.frame, sp.left, sp.dx, sp.dy, sp.x, sp.y),
+        Actor::NameEntry(n) => format!(
+            "name entry {:04X} parent {:X} id {} rank {} timeout {:X} cursor {} letters {:02X?} blink {} delay {}",
+            n.state.code(), n.parent, n.player_id, n.rank, n.timeout, n.cursor, n.letters, n.blink, n.delay
+        ),
         Actor::ShakeField(sh) => format!("shake field angle {:02X} strength {:X} scroll {:X}", sh.angle, sh.strength, sh.scroll),
         Actor::PasswordBean(b) => format!("password bean color {:02X} at {:X},{:X} anim {:?}", b.color, b.x, b.y, b.anim),
         Actor::PortraitPalette(pt) => format!("portrait palette wait {} step {:04X} level {}", pt.wait, pt.step, pt.level),
