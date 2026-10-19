@@ -57,6 +57,14 @@ fn load(ram: &Ram, slot: usize, tag: u8) -> Option<Actor> {
         PlayerState::PreSpawn2,
         PlayerState::PreSpawn3,
         PlayerState::Spawn,
+        PlayerState::PopScore,
+        PlayerState::PopBackup,
+        PlayerState::Blink,
+        PlayerState::PopSpawn,
+        PlayerState::PopWait,
+        PlayerState::Compact,
+        PlayerState::FallWait,
+        PlayerState::ChainNext,
     ]
     .into_iter()
     .find(|s| s.code() == code);
@@ -70,8 +78,17 @@ fn load(ram: &Ram, slot: usize, tag: u8) -> Option<Actor> {
             chain: ram.u8(a + 9),
             fall_speed: ram.u16(a + 0x1A),
             speed_level: ram.u8(a + 0x2B),
-            soft_drop_points: 0,
             pending_garbage: ram.u16(a + 0x14),
+            speed_index: ram.u8(a + 0x08),
+            score: ram.u32(a + 0x0A),
+            acc: ram.u32(a + 0x0E),
+            base: ram.u16(a + 0x12),
+            bonus: ram.u16(a + 0x1E),
+            beans_total: ram.u16(a + 0x16),
+            beans_count: ram.u16(a + 0x18),
+            threshold: ram.u16(a + 0x1C),
+            garbage_sent: 0,
+            pop: None,
         }));
     }
     let pivot_state = [PivotState::Falling, PivotState::Squash].into_iter().find(|s| s.code() == code);
@@ -128,11 +145,21 @@ fn describe(actor: &Actor) -> String {
     match actor {
         Actor::Opaque => "opaque".into(),
         Actor::Player(p) => format!(
-            "player {:04X} flags {:02X} w26 {:04X} delay {}",
+            "player {:04X} flags {:02X} delay {} chain {} score {} acc {} base {} bonus {} beans {}/{} speed {:04X} step {} next {} w26 {:04X}",
             p.state.code(),
-            p.flags & 0x07,
+            p.flags & 0x17,
+            p.delay,
+            p.chain,
+            p.score,
+            p.acc,
+            p.base,
+            p.bonus,
+            p.beans_total,
+            p.beans_count,
+            p.fall_speed,
+            p.speed_index,
+            p.threshold,
             p.w26,
-            p.delay
         ),
         Actor::Pivot(v) => match v.state {
             PivotState::Init | PivotState::Controlled => format!("pivot {:04X}", v.state.code()),
@@ -234,6 +261,9 @@ struct Stats {
     falls: usize,
     lag_frames: usize,
     split_frames: usize,
+    pop_frames: usize,
+    chained_pieces: usize,
+    longest_chain: u8,
 }
 
 #[test]
@@ -260,8 +290,9 @@ fn between_pieces_matches_the_original_frame_by_frame() {
         }
     }
     eprintln!(
-        "{} pieces, {} frames identical ({} with a physics fall, {} lag and {} split frames); stopped at unported: {:?}",
-        stats.pieces, stats.frames, stats.falls, stats.lag_frames, stats.split_frames, stats.unported
+        "{} pieces, {} frames identical ({} with a physics fall, {} lag and {} split frames);          {} pieces popped ({} frames in pop states, longest chain {}); stopped at unported: {:?}",
+        stats.pieces, stats.frames, stats.falls, stats.lag_frames, stats.split_frames,
+        stats.chained_pieces, stats.pop_frames, stats.longest_chain, stats.unported
     );
     assert!(stats.pieces > 0 || std::env::var_os("MBM_REQUIRE_RECORDINGS").is_none());
 }
@@ -280,6 +311,8 @@ fn check_piece(
     let ram = &all[start];
     let mut engine = Engine::new();
     engine.fields[player] = Field::from_words(&ram.field_words(player));
+    engine.level_mode = ram.u8(0xFF_1964);
+    engine.difficulty = ram.u8(0xFF_0104);
     for slot in 0..SLOTS {
         engine.slots[slot] = load(ram, slot, tag).or_else(|| used(ram, slot).then_some(Actor::Opaque));
     }
@@ -299,6 +332,7 @@ fn check_piece(
     inputs.next_pair[player] = Some((color(&all[spawn], pv), color(&all[spawn], st)));
     inputs.spawn_slots[player] = Some((slot_of(pv), slot_of(st)));
     let mut fell = false;
+    let mut chain_seen = 0u8;
     // True when the last snapshot caught the ROM halfway through a logic frame: the next
     // snapshot finishes that same frame (see `split_frame`).
     let mut finishing = false;
@@ -355,6 +389,12 @@ fn check_piece(
             return Some(f);
         }
         for s in engine.slots.iter().flatten() {
+            if let Actor::Player(p) = s {
+                if p.pop.is_some() {
+                    stats.pop_frames += 1;
+                    chain_seen = chain_seen.max(p.chain + 1);
+                }
+            }
             fell |= matches!(s, Actor::Pivot(v) if v.state == PivotState::Falling)
                 || matches!(s, Actor::Satellite(t) if t.state == SatelliteState::Falling);
         }
@@ -373,5 +413,7 @@ fn check_piece(
     }
     stats.pieces += 1;
     stats.falls += usize::from(fell);
+    stats.chained_pieces += usize::from(chain_seen > 0);
+    stats.longest_chain = stats.longest_chain.max(chain_seen);
     Some(spawn + 1)
 }
