@@ -78,12 +78,15 @@ pub enum Actor {
     Piece(Piece),
     GarbageClear(GarbageClear),
     Glow(Glow),
+    GarbageDrop(GarbageDrop),
+    GarbageColumn(GarbageColumn),
+    Icon(Icon),
 }
 
 impl Actor {
     /// Allocated by `FindActorSlotQuick` (pop visuals): `FindActorSlot` may evict it.
     pub fn evictable(&self) -> bool {
-        matches!(self, Actor::Burst(_) | Actor::Piece(_) | Actor::GarbageClear(_) | Actor::OpaqueQuick)
+        matches!(self, Actor::Burst(_) | Actor::Piece(_) | Actor::GarbageClear(_) | Actor::Icon(_) | Actor::OpaqueQuick)
     }
 
     /// The original resume address of this actor's current state (None for `Opaque`).
@@ -98,6 +101,9 @@ impl Actor {
             Actor::Piece(p) => Some(p.state.code()),
             Actor::GarbageClear(_) => Some(0x4DA4),
             Actor::Glow(g) => Some(g.state.code()),
+            Actor::GarbageDrop(d) => Some(if d.started { 0x48BA } else { 0x48A2 }),
+            Actor::GarbageColumn(c) => Some(if c.landed { 0x5044 } else { 0x486A }),
+            Actor::Icon(_) => Some(0x9962),
         }
     }
 }
@@ -288,13 +294,19 @@ impl SatelliteState {
 pub struct Fall {
     pub y: u32,
     pub vel: u32,
+    /// +$1E: added to `vel` every frame ($3000 for the pair, per column for garbage).
+    pub accel: u16,
     /// +$20 word: y where the fall started, minus 15.
     pub base: u16,
 }
 
 impl Fall {
     fn start(y: u32) -> Fall {
-        Fall { y, vel: FALL_START_VEL, base: ((y >> 16) as u16).wrapping_sub(15) }
+        Fall::with(y, FALL_START_VEL, FALL_ACCEL)
+    }
+
+    fn with(y: u32, vel: u32, accel: u16) -> Fall {
+        Fall { y, vel, accel, base: ((y >> 16) as u16).wrapping_sub(15) }
     }
 
     /// One frame. Returns true once the bean rests (y snapped to 8 px). `row` advances
@@ -314,7 +326,7 @@ impl Fall {
             *row = row.wrapping_add(1);
         }
         self.y = next;
-        self.vel = self.vel.wrapping_add(u32::from(FALL_ACCEL)).min(FALL_MAX_VEL);
+        self.vel = self.vel.wrapping_add(u32::from(self.accel)).min(FALL_MAX_VEL);
         false
     }
 }
@@ -504,6 +516,8 @@ impl GlowState {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Glow {
     pub player: u8,
+    /// The chaining player's actor (+$2E).
+    pub player_slot: usize,
     /// Chain step it was spawned on (+$2B; 0 = first step).
     pub chain: u8,
     pub motion: Motion,
@@ -514,6 +528,68 @@ pub struct Glow {
     pub delay: u16,
     pub anim: Anim,
     pub state: GlowState,
+}
+
+// ---------------------------------------------------------------- garbage
+
+/// Per-column acceleration of falling garbage (`word_47BA`).
+const GARBAGE_ACCEL: [u16; 6] = [0x2400, 0x2600, 0x2000, 0x2A00, 0x2200, 0x2800];
+/// Start speed of falling garbage, px/frame, by difficulty (`word_4730`).
+const GARBAGE_START_SPEED: [u16; 3] = [3, 2, 0];
+/// Small-icon nudge on P1's side, by size (`unk_9924`).
+const ICON_NUDGE: [i16; 5] = [4, -8, -20, -32, -44];
+
+/// A garbage drop in progress (`ActGarbagePuyo`): counts the falling columns, shakes
+/// the field each time one lands, and clears the player's "garbage falling" flag when
+/// everything is down.
+#[derive(Clone, Debug, PartialEq)]
+pub struct GarbageDrop {
+    pub player_slot: usize,
+    /// False before its first run ($48A2), true in the update loop ($48BA).
+    pub started: bool,
+    /// Columns still falling (+$26) and the count last seen (+$28).
+    pub falling: u16,
+    pub seen: u16,
+    /// +$20: (1 + columns) × $100, the shake strength when a column lands.
+    pub strength: u16,
+    /// +$38: current shake strength, -$40 per frame; +$36 shake phase.
+    pub shake: u16,
+    pub phase: u8,
+    /// +$07 bit 0: the "incoming!" voice played.
+    pub voiced: bool,
+    /// +$09: copied from the last column to land.
+    pub frame: u8,
+}
+
+/// One column of falling garbage (`sub_486A`): the whole stack drops as one sprite and
+/// is written into the field when it lands.
+#[derive(Clone, Debug, PartialEq)]
+pub struct GarbageColumn {
+    pub player: u8,
+    pub drop_slot: usize,
+    pub col: u16,
+    /// Row of the stack's bottom bean (+$1C).
+    pub row: u16,
+    /// +$09: beans in the stack + $13 (and +6 while a single bean lingers).
+    pub frame: u8,
+    pub fall: Fall,
+    /// Landed: a single bean lingers 48 frames ($5044); taller stacks vanish at once.
+    pub landed: bool,
+    pub linger: u16,
+}
+
+/// An incoming-garbage icon above a field (`sub_9962`): slides into place over 16
+/// frames, vanishes when its side's icons are redrawn.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Icon {
+    /// Which generation counter it watches (0 = over P2's field, 1 = over P1's).
+    pub side: u8,
+    pub generation: u8,
+    /// +$09: 5 = 6 beans, 6 = 30 beans, 0-4 = 1-5 beans.
+    pub frame: u8,
+    pub motion: Motion,
+    /// Frames of sliding left (+$26).
+    pub slide: u16,
 }
 
 // ---------------------------------------------------------------- engine
@@ -621,8 +697,17 @@ pub struct Engine {
     pub rng_calls: u32,
     /// `garbage_glow_x`/`_y`: where the last popped bean was; the glow starts there.
     pub glow_xy: (u16, u16),
-    /// Spawns of actors this port doesn't have yet (garbage icons after a glow).
+    /// Spawns of actors this port doesn't have yet.
     pub unported_spawns: u32,
+    /// `byte_FF19B2`/`_B3`: a player is in the middle of a chain.
+    pub chaining: [bool; 2],
+    /// `byte_FF19B0`/`_B1`: icon generations; icons of an older generation vanish.
+    /// Index 0 = icons over P2's field, 1 = over P1's.
+    pub icon_gen: [u8; 2],
+    /// Pending garbage of a player with no actor in this engine (set by the caller).
+    pub external_pending: [u16; 2],
+    /// Sides whose icons this engine redrew during the last frame.
+    pub icons_drawn: [bool; 2],
     /// `Random` calls made by unported actors, as (before slot, count): drawn just
     /// before that slot runs (used when checking against recordings).
     pub foreign_random: Vec<(usize, u32)>,
@@ -644,6 +729,10 @@ impl Engine {
             rng_calls: 0,
             glow_xy: (0, 0),
             unported_spawns: 0,
+            chaining: [false; 2],
+            icon_gen: [0; 2],
+            external_pending: [0; 2],
+            icons_drawn: [false; 2],
             foreign_random: vec![],
             rng_users: vec![],
             current_slot: usize::MAX,
@@ -715,6 +804,7 @@ impl Engine {
     /// in the middle of `RunActors`; see `run_slots`.)
     pub fn vblank(&mut self) {
         self.rng_calls = 0;
+        self.icons_drawn = [false; 2];
         self.rng_users.clear();
         self.current_slot = usize::MAX;
         for slot in std::mem::take(&mut self.fall_commands) {
@@ -750,6 +840,9 @@ impl Engine {
                 Actor::Piece(p) => run_piece(p).map(Actor::Piece),
                 Actor::GarbageClear(mut g) => (!g.anim.step()).then_some(Actor::GarbageClear(g)),
                 Actor::Glow(g) => self.run_glow(g).map(Actor::Glow),
+                Actor::GarbageDrop(d) => self.run_garbage_drop(d).map(Actor::GarbageDrop),
+                Actor::GarbageColumn(c) => self.run_garbage_column(c).map(Actor::GarbageColumn),
+                Actor::Icon(i) => self.run_icon(i).map(Actor::Icon),
             };
             self.slots[slot] = next;
         }
@@ -790,6 +883,7 @@ impl Engine {
                         }
                     }
                     p.pop = Some(PopWork { groups, cells, backup: field.clone(), falling: vec![] });
+                    self.chaining[p.id as usize & 1] = true;
                     p.state = PopScore;
                 } else {
                     p.delay = SETTLE_DELAY[p.speed_level.min(4) as usize];
@@ -823,7 +917,7 @@ impl Engine {
                 add_points(&mut p, points);
                 self.spawn_pops(&p);
                 if self.level_mode & 2 == 0 {
-                    self.spawn_glow(&p);
+                    self.spawn_glow(slot, &p);
                 }
                 p.delay = 0x18;
                 p.state = PopWait;
@@ -862,9 +956,13 @@ impl Engine {
                 if p.chain != 0 && self.level_mode & 2 == 0 {
                     self.send_garbage(slot, &mut p);
                 }
+                // loc_3DB0
                 p.chain = 0;
-                if p.pending_garbage != 0 {
-                    return Err(Unported("garbage drop (SpawnGarbage)"));
+                self.chaining[p.id as usize & 1] = false;
+                self.spawn_garbage(slot, &mut p);
+                if self.level_mode & 2 == 0 && !self.chaining[(p.id as usize & 1) ^ 1] {
+                    // sub_9814: this player's own incoming garbage.
+                    self.show_icons(p.id ^ 1, u32::from(p.pending_garbage));
                 }
                 p.state = WaitGarbage;
             }
@@ -919,11 +1017,12 @@ impl Engine {
     }
 
     /// `SpawnGarbageGlow`.
-    fn spawn_glow(&mut self, p: &Player) {
+    fn spawn_glow(&mut self, player_slot: usize, p: &Player) {
         let Some(slot) = self.find_actor_slot() else { return };
         let (x, y) = self.glow_xy;
         self.slots[slot] = Some(Actor::Glow(Glow {
             player: p.id,
+            player_slot,
             chain: p.chain,
             motion: Motion { x: u32::from(x) << 16, y: u32::from(y) << 16, ..Motion::default() },
             draw: 0,
@@ -1034,8 +1133,202 @@ impl Engine {
     /// `loc_2371C`: refresh the opponent's incoming-garbage icons (not ported: they
     /// are separate actors), then play out the animation.
     fn glow_finish(&mut self, g: &mut Glow) {
-        self.unported_spawns += 1;
+        // loc_984A: the opponent's icons, showing what this chain will send.
+        let (acc, id) = match &self.slots[g.player_slot] {
+            Some(Actor::Player(p)) => (p.acc, p.id),
+            _ => (0, g.player),
+        };
+        let total = (acc & 0xFFFF) / GARBAGE_POINTS + u32::from(self.pending_of(id ^ 1));
+        self.show_icons(id, total & 0xFFFF);
         g.state = GlowState::End;
+    }
+
+    fn pending_of(&self, id: u8) -> u16 {
+        self.slots
+            .iter()
+            .find_map(|s| match s {
+                Some(Actor::Player(p)) if p.id == id => Some(p.pending_garbage),
+                _ => None,
+            })
+            .unwrap_or(self.external_pending[id as usize & 1])
+    }
+
+    /// `SpawnGarbage`: shuffle the columns, deal up to 30 pending beans into them, and
+    /// start one falling stack per column plus the drop's controller.
+    fn spawn_garbage(&mut self, player_slot: usize, p: &mut Player) {
+        if p.pending_garbage == 0 {
+            return;
+        }
+        let id = p.id as usize & 1;
+        // SetGarbageOrder
+        let mut order = [0u8, 1, 2, 3, 4, 5];
+        for i in (0..COLS).rev() {
+            let r = self.random();
+            let j = ((u32::from(r) * 6) >> 16) as usize;
+            order.swap(i, j);
+        }
+        // GetGarbageFreeSpace / SetGarbageCounts
+        let room = self.fields[id].garbage_room();
+        let mut counts = [0u8; COLS];
+        let mut placed = 0u16;
+        for i in 0..p.pending_garbage.min(super::field::MAX_GARBAGE_DROP) as usize {
+            let c = order[i % COLS] as usize;
+            if counts[c] < room[c] {
+                counts[c] += 1;
+                placed += 1;
+            }
+        }
+        p.pending_garbage -= placed;
+        let Some(drop_slot) = self.find_actor_slot() else { return };
+        self.slots[drop_slot] = Some(Actor::GarbageDrop(GarbageDrop {
+            player_slot,
+            started: false,
+            falling: 0,
+            seen: 0,
+            strength: 0x0100,
+            shake: 0,
+            phase: 0,
+            voiced: false,
+            frame: 0,
+        }));
+        p.flags |= flag::GARBAGE_FALLING;
+        let speed_index = if self.level_mode == 0 && self.difficulty < 3 { self.difficulty as usize } else { 2 };
+        let speed = u32::from(GARBAGE_START_SPEED[speed_index]) << 16;
+        let y = FIELD_TOP_Y - 8;
+        for col in (0..COLS).rev() {
+            if counts[col] == 0 {
+                continue;
+            }
+            let Some(slot) = self.find_actor_slot() else { continue };
+            if let Some(Actor::GarbageDrop(d)) = self.slots[drop_slot].as_mut() {
+                d.falling += 1;
+                d.strength = d.strength.wrapping_add(0x100);
+            }
+            self.slots[slot] = Some(Actor::GarbageColumn(GarbageColumn {
+                player: p.id,
+                drop_slot,
+                col: col as u16,
+                row: 1,
+                frame: counts[col] + 0x13,
+                fall: Fall::with(u32::from(y) << 16, speed, GARBAGE_ACCEL[col]),
+                landed: false,
+                linger: 0,
+            }));
+        }
+    }
+
+    fn run_garbage_drop(&mut self, mut d: GarbageDrop) -> Option<GarbageDrop> {
+        if !d.started {
+            d.seen = d.falling;
+            d.started = true;
+            return Some(d);
+        }
+        if d.falling != d.seen {
+            d.seen = d.falling;
+            d.shake = d.strength;
+            d.voiced = true;
+        }
+        d.phase = d.phase.wrapping_add(0x18);
+        if d.shake != 0 {
+            d.shake = d.shake.wrapping_sub(0x40);
+            return Some(d);
+        }
+        if d.falling != 0 {
+            return Some(d);
+        }
+        if let Some(Actor::Player(p)) = self.slots[d.player_slot].as_mut() {
+            p.flags &= !flag::GARBAGE_FALLING;
+        }
+        None
+    }
+
+    fn run_garbage_column(&mut self, mut c: GarbageColumn) -> Option<GarbageColumn> {
+        let id = c.player as usize & 1;
+        if c.landed {
+            if self.popping[id] {
+                return None;
+            }
+            c.linger -= 1;
+            return (c.linger != 0).then_some(c);
+        }
+        let mut row = c.row;
+        let down = c.fall.step(&self.fields[id], c.col, &mut row);
+        c.row = row;
+        if !down {
+            return Some(c);
+        }
+        // Write the stack bottom-up.
+        for _ in 0..c.frame.saturating_sub(0x13) {
+            self.mark(id, c.col, c.row, BeanColor::Garbage);
+            c.row = c.row.wrapping_sub(1);
+        }
+        if let Some(Actor::GarbageDrop(d)) = self.slots[c.drop_slot].as_mut() {
+            d.falling = d.falling.wrapping_sub(1);
+            d.frame = c.frame;
+        }
+        // loc_502C
+        if c.frame >= 0x15 {
+            return None;
+        }
+        c.frame += 6;
+        c.linger = 0x30;
+        c.landed = true;
+        Some(c)
+    }
+
+    /// `loc_9858`: redraw one side's incoming-garbage icons for `total` beans:
+    /// up to six big icons (30 or 6 beans), then a small one for the rest.
+    fn show_icons(&mut self, side: u8, total: u32) {
+        if self.popping.iter().any(|&p| p) {
+            return;
+        }
+        let side = side & 1;
+        self.icons_drawn[side as usize] = true;
+        self.icon_gen[side as usize] = self.icon_gen[side as usize].wrapping_add(1);
+        let generation = self.icon_gen[side as usize];
+        let (start_x, mut target_x, step): (u16, u16, u16) =
+            if side == 0 { (0x180, 0x150, 0x10) } else { (0xC0, 0xE0, 0xFFF0) };
+        let (mut big, small) = (total / 6, total % 6);
+        let mut index = 0;
+        let icon = |engine: &mut Engine, target: u16, frame: u8, nudge: i16| -> bool {
+            let Some(slot) = engine.free_slot() else { return false };
+            let vx = ((u32::from(target.wrapping_sub(start_x)) << 16) as i32 >> 4) as u32;
+            let x = start_x.wrapping_add(nudge as u16);
+            engine.slots[slot] = Some(Actor::Icon(Icon {
+                side,
+                generation,
+                frame,
+                motion: Motion { x: u32::from(x) << 16, y: 0x88 << 16, vx, ..Motion::default() },
+                slide: 0x10,
+            }));
+            true
+        };
+        while big != 0 && index < 6 {
+            // sub_98B4
+            let frame = if big - 1 >= 4 { 6 } else { 5 };
+            if icon(self, target_x, frame, 0) {
+                big -= 1;
+                if frame == 6 {
+                    big -= 4;
+                }
+            }
+            target_x = target_x.wrapping_add(step);
+            index += 1;
+        }
+        if index < 6 && small != 0 {
+            // sub_98F2
+            let frame = (small - 1) as u8;
+            let nudge = if start_x == 0xC0 { ICON_NUDGE[frame as usize] } else { 0 };
+            icon(self, target_x, frame, nudge);
+        }
+    }
+
+    fn run_icon(&mut self, mut i: Icon) -> Option<Icon> {
+        if i.slide != 0 {
+            i.motion.step(0xA2);
+            i.slide -= 1;
+        }
+        (self.icon_gen[i.side as usize] == i.generation).then_some(i)
     }
 
     /// `sub_9A56`: base points and bonus for this chain step, and the bean counters.

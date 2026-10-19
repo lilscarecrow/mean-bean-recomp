@@ -15,6 +15,14 @@ use bean_machine::mbm::BeanColor;
 use support::{frames, recordings, Ram, FRAME_COUNT, P1, P1_CTRL, P1_KEYS, P2};
 
 const RNG_SEED: u32 = 0xFF_1116;
+const ICON_GEN: u32 = 0xFF_19B0;
+const CHAINING: u32 = 0xFF_19B2;
+const ICON_CODE: u32 = 0x9962;
+
+fn icon_side(ram: &Ram, a: u32) -> u8 {
+    (ram.u32(a + 0x32).wrapping_sub(ICON_GEN) & 1) as u8
+}
+
 
 const ACTORS: u32 = 0xFF_E000;
 
@@ -41,16 +49,54 @@ fn color(ram: &Ram, a: u32) -> BeanColor {
 }
 
 fn fall_from(ram: &Ram, a: u32) -> Fall {
-    Fall { y: ram.u32(a + 0x0E), vel: ram.u32(a + 0x16), base: ram.u16(a + 0x20) }
+    Fall { y: ram.u32(a + 0x0E), vel: ram.u32(a + 0x16), accel: ram.u16(a + 0x1E), base: ram.u16(a + 0x20) }
 }
 
 /// Rebuilds a ported actor from RAM by its resume address; None if it isn't one.
 fn load(ram: &Ram, slot: usize, tag: u8) -> Option<Actor> {
     let a = slot_addr(slot);
-    if ram.u8(a) != tag || !used(ram, slot) {
+    if !used(ram, slot) {
         return None;
     }
     let code = ram.code(a);
+    // Icons belong to no player (tag $FF) and behave the same whoever drew them.
+    if code == ICON_CODE {
+        return Some(Actor::Icon(Icon {
+            side: icon_side(ram, a),
+            generation: ram.u8(a + 0x28),
+            frame: ram.u8(a + 9),
+            motion: Motion { x: ram.u32(a + 0x0A), y: ram.u32(a + 0x0E), vx: ram.u32(a + 0x12), ..Motion::default() },
+            slide: ram.u16(a + 0x26),
+        }));
+    }
+    if ram.u8(a) != tag {
+        return None;
+    }
+    if code == 0x48A2 || code == 0x48BA {
+        return Some(Actor::GarbageDrop(GarbageDrop {
+            player_slot: slot_of(ram.u32(a + 0x2E)),
+            started: code == 0x48BA,
+            falling: ram.u16(a + 0x26),
+            seen: ram.u16(a + 0x28),
+            strength: ram.u16(a + 0x20),
+            shake: ram.u16(a + 0x38),
+            phase: ram.u8(a + 0x36),
+            voiced: ram.u8(a + 7) & 1 != 0,
+            frame: ram.u8(a + 9),
+        }));
+    }
+    if code == 0x486A || code == 0x5044 {
+        return Some(Actor::GarbageColumn(GarbageColumn {
+            player: ram.u8(a + 0x2A),
+            drop_slot: slot_of(ram.u32(a + 0x2E)),
+            col: ram.u16(a + 0x1A),
+            row: ram.u16(a + 0x1C),
+            frame: ram.u8(a + 9),
+            fall: fall_from(ram, a),
+            landed: code == 0x5044,
+            linger: ram.u16(a + 0x26),
+        }));
+    }
     let player_state = [
         PlayerState::WaitPair,
         PlayerState::FindPops,
@@ -172,6 +218,7 @@ fn load(ram: &Ram, slot: usize, tag: u8) -> Option<Actor> {
     if let Some(state) = glow_states.into_iter().find(|s| s.code() == code) {
         return Some(Actor::Glow(Glow {
             player: ram.u8(a + 0x2A),
+            player_slot: slot_of(ram.u32(a + 0x2E)),
             chain: ram.u8(a + 0x2B),
             motion: motion(),
             draw: ram.u8(a + 6),
@@ -237,6 +284,18 @@ fn describe(actor: &Actor) -> String {
             p.state.code(), p.color, p.motion.x, p.motion.y, p.motion.vx, p.motion.vy, p.draw, p.delay, p.anim
         ),
         Actor::GarbageClear(g) => format!("garbage clear at {:X},{:X} anim {:?}", g.x, g.y, g.anim),
+        Actor::GarbageDrop(d) => format!(
+            "garbage drop {:04X} falling {} seen {} strength {:04X} shake {:04X} phase {:02X} frame {:02X}",
+            if d.started { 0x48BA } else { 0x48A2 }, d.falling, d.seen, d.strength, d.shake, d.phase, d.frame
+        ),
+        Actor::GarbageColumn(c) => format!(
+            "garbage column {:04X} col {} row {} frame {:02X} y {:08X} vel {:08X} linger {}",
+            if c.landed { 0x5044 } else { 0x486A }, c.col, c.row, c.frame, c.fall.y, c.fall.vel, c.linger
+        ),
+        Actor::Icon(i) => format!(
+            "icon side {} gen {} frame {} x {:08X} y {:08X} vx {:08X} slide {}",
+            i.side, i.generation, i.frame, i.motion.x, i.motion.y, i.motion.vx, i.slide
+        ),
         Actor::Glow(g) => format!(
             "glow {:05X} chain {} pos {:08X},{:08X} vel {:08X},{:08X} base {:X} counter {:04X} draw {:02X} delay {} anim {:?}",
             g.state.code(), g.chain, g.motion.x, g.motion.y, g.motion.vx, g.motion.vy, g.base_x, g.counter, g.draw, g.delay, g.anim
@@ -258,6 +317,28 @@ fn describe_ram(ram: &Ram, slot: usize, tag: u8, ours: &Actor) -> Option<String>
     }
 }
 
+
+/// Icons the opponent drew this frame appear in the ROM without us making them (add
+/// them), and its redraws can retire icons of ours before their turn (drop them).
+fn absorb_foreign_icons(engine: &mut Engine, cur: &Ram, tag: u8) {
+    let rom_gen = [cur.u8(ICON_GEN), cur.u8(ICON_GEN + 1)];
+    for slot in 0..SLOTS {
+        let rom_icon = used(cur, slot) && cur.code(slot_addr(slot)) == ICON_CODE;
+        match &engine.slots[slot] {
+            // Only for sides we didn't redraw ourselves: icons we owed are not excused.
+            None | Some(Actor::Opaque) | Some(Actor::OpaqueQuick) | Some(Actor::Vanishing)
+                if rom_icon && !engine.icons_drawn[icon_side(cur, slot_addr(slot)) as usize] =>
+            {
+                engine.slots[slot] = load(cur, slot, tag);
+            }
+            Some(Actor::Icon(i)) if !rom_icon && rom_gen[i.side as usize] != engine.icon_gen[i.side as usize] => {
+                engine.slots[slot] = None;
+            }
+            _ => {}
+        }
+    }
+    engine.icon_gen = rom_gen;
+}
 
 /// Ways to place `n` foreign random draws in the gaps before each of `gaps` actors of
 /// ours (the rest come after the last one, where they can't affect us).
@@ -352,6 +433,7 @@ struct Stats {
     rng_calls: usize,
     rng_foreign: usize,
     rng_resolved: usize,
+    icon_redraws: usize,
     visuals: std::collections::BTreeMap<&'static str, usize>,
 }
 
@@ -381,10 +463,10 @@ fn between_pieces_matches_the_original_frame_by_frame() {
     eprintln!(
         "{} pieces, {} frames identical ({} with a physics fall, {} lag and {} split frames);          {} pieces popped ({} frames in pop states, longest chain {}); stopped at unported: {:?}\n\
          random: {} frames fully accounted ({} calls), {} frames with calls by unported actors ({} needed a split)\n\
-         pop visuals (actor-frames): {:?}",
+         pop and garbage visuals (actor-frames): {:?}; icon redraws by us: {}",
         stats.pieces, stats.frames, stats.falls, stats.lag_frames, stats.split_frames,
         stats.chained_pieces, stats.pop_frames, stats.longest_chain, stats.unported,
-        stats.rng_frames, stats.rng_calls, stats.rng_foreign, stats.rng_resolved, stats.visuals
+        stats.rng_frames, stats.rng_calls, stats.rng_foreign, stats.rng_resolved, stats.visuals, stats.icon_redraws
     );
     assert!(stats.pieces > 0 || std::env::var_os("MBM_REQUIRE_RECORDINGS").is_none());
 }
@@ -406,6 +488,8 @@ fn check_piece(
     engine.level_mode = ram.u8(0xFF_1964);
     engine.difficulty = ram.u8(0xFF_0104);
     engine.glow_xy = (ram.u16(0xFF_19AC), ram.u16(0xFF_19AE));
+    engine.icon_gen = [ram.u8(ICON_GEN), ram.u8(ICON_GEN + 1)];
+    engine.chaining = [ram.u8(CHAINING) != 0, ram.u8(CHAINING + 1) != 0];
     for slot in 0..SLOTS {
         engine.slots[slot] = load(ram, slot, tag).or_else(|| {
             used(ram, slot).then_some(if ram.u8(slot_addr(slot) + 1) & 0x80 == 0 { Actor::OpaqueQuick } else { Actor::Opaque })
@@ -459,7 +543,7 @@ fn check_piece(
                 // Also reserve slots that unported code fills this frame (the opponent's
                 // actors, garbage icons): our own spawns this frame must go around them.
                 None | Some(Actor::Opaque) | Some(Actor::OpaqueQuick) | Some(Actor::Vanishing) => {
-                    let foreign_now = used(cur, slot) && cur.u8(slot_addr(slot)) != tag;
+                    let foreign_now = used(cur, slot) && cur.u8(slot_addr(slot)) != tag && cur.code(slot_addr(slot)) != ICON_CODE;
                     // A foreign actor that isn't there at the end of the frame deleted itself
                     // on its turn (the slot may already hold one of ours by then).
                     let foreign_gone = used(prev, slot) && prev.u8(slot_addr(slot)) != tag && !foreign_now;
@@ -493,6 +577,12 @@ fn check_piece(
                 _ => {}
             }
         }
+        // Shared state the unported opponent also writes.
+        engine.icon_gen = [prev.u8(ICON_GEN), prev.u8(ICON_GEN + 1)];
+        engine.chaining = [prev.u8(CHAINING) != 0, prev.u8(CHAINING + 1) != 0];
+        if let Some(o) = prev.player_actor(other) {
+            engine.external_pending[(other & 1 ^ 1) as usize] = prev.u16(o + 0x14);
+        }
         if tag == P1 {
             inputs.pads[0] = PadInput { hold: cur.u8(P1_CTRL), press: cur.u8(P1_CTRL + 1), repeat: cur.u8(P1_CTRL + 2) };
             inputs.keys[0] = RotateKeys(cur.bytes(P1_KEYS, 3).try_into().unwrap());
@@ -511,6 +601,10 @@ fn check_piece(
             *stats.unported.entry(what).or_default() += 1;
             return Some(f);
         }
+        for side in 0..2 {
+            stats.icon_redraws += usize::from(engine.icons_drawn[side]);
+        }
+        absorb_foreign_icons(&mut engine, cur, tag);
         // The ROM's own code can overwrite a slot we model through a stale pointer held
         // by an unported actor (seen with a full actor table). Can't be predicted: stop.
         let overwritten = (0..SLOTS).any(|slot| {
@@ -529,6 +623,10 @@ fn check_piece(
                 Actor::GarbageClear(_) => Some("garbage clear frames"),
                 Actor::Glow(g) if g.state == GlowState::Fly => Some("glow flight frames"),
                 Actor::Glow(_) => Some("glow frames"),
+                Actor::GarbageDrop(_) => Some("garbage drop frames"),
+                Actor::GarbageColumn(c) if c.landed => Some("landed single garbage frames"),
+                Actor::GarbageColumn(_) => Some("falling garbage column frames"),
+                Actor::Icon(_) => Some("icon frames"),
                 _ => None,
             };
             if let Some(k) = kind {
