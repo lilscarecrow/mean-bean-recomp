@@ -55,6 +55,14 @@ fn engine_from(ram: &Ram) -> Result<Engine, String> {
     e.danger_flash = ram.u8(0xFF_1121);
     e.portrait_lock = ram.u16(0xFF_1124);
     e.pal_fade_gen = [0, 1, 2, 3].map(|i| ram.u16(PAL_FADE + i * 0x82));
+    e.difficulty_option = ram.u8(0xFF_1120);
+    e.bonus_level = ram.u8(0xFF_0114);
+    e.bytecode_flag = ram.u8(0xFF_0A3A);
+    e.result_score = ram.u32(0xFF_195C);
+    e.result_beans = ram.u16(0xFF_1960);
+    e.password = ram.u16(0xFF_111E);
+    e.high_scores[..0xA0].copy_from_slice(ram.bytes(0xFF_FC04, 0xA0));
+    e.high_score_table = ram.u8(0xFF_1972);
     e.glow_xy = (ram.u16(0xFF_19AC), ram.u16(0xFF_19AE));
     e.icon_gen = [ram.u8(ICON_GEN), ram.u8(ICON_GEN + 1)];
     e.chaining = [ram.u8(CHAINING) != 0, ram.u8(CHAINING + 1) != 0];
@@ -117,6 +125,19 @@ fn mismatch(e: &Engine, ram: &Ram) -> Option<String> {
     if ram.u8(0xFF_1121) != e.danger_flash {
         return Some(format!("danger flash: ROM {} ours {}", ram.u8(0xFF_1121), e.danger_flash));
     }
+    let results = (ram.u8(0xFF_0A3A), ram.u32(0xFF_195C), ram.u16(0xFF_1960), ram.u16(0xFF_111E), ram.u8(0xFF_0104));
+    if results != (e.bytecode_flag, e.result_score, e.result_beans, e.password, e.difficulty) {
+        return Some(format!(
+            "results (winner, score, beans, password, CPU difficulty): ROM {results:X?} ours {:X?}",
+            (e.bytecode_flag, e.result_score, e.result_beans, e.password, e.difficulty)
+        ));
+    }
+    if ram.bytes(0xFF_FC04, 0xA0) != &e.high_scores[..0xA0] || ram.u8(0xFF_1972) != e.high_score_table {
+        return Some("high score tables".into());
+    }
+    if (0..2).any(|i| (ram.u8(0xFF_19AA + i) != 0) != e.popping[i as usize]) {
+        return Some("puyos_popping".into());
+    }
     if ram.u16(0xFF_198C) != e.crowding {
         return Some(format!("crowding: ROM {} ours {}", ram.u16(0xFF_198C), e.crowding));
     }
@@ -140,6 +161,11 @@ struct Run {
     lag: usize,
     split: usize,
     pieces: usize,
+    finished: usize,
+}
+
+fn ram_says_bytecode_runs(ram: &Ram) -> bool {
+    ram.u8(0xFF_0A3B) == 0
 }
 
 /// Runs one match from `start`. Ok(reason it stopped) or Err(first mismatch).
@@ -202,6 +228,13 @@ fn run_match(all: &[Ram], start: usize, poked: &std::collections::HashSet<usize>
         }
         run.pieces += count_pairs(&engine).saturating_sub(pieces_before);
         run.frames += 1;
+        if engine.match_over {
+            run.finished += 1;
+            if ram_says_bytecode_runs(cur) {
+                return Ok(format!("frame {f}: match over, the game flow takes over"));
+            }
+            return Err(format!("frame {f}: we ended the match, the ROM's bytecode is still disabled"));
+        }
     }
     Ok("the recording ended".into())
 }
@@ -255,7 +288,7 @@ fn whole_matches_run_on_the_engine_alone() {
         }
     }
     eprintln!(
-        "{matches} matches, {} frames identical ({} lag, {} split), {} pairs dealt; stopped at: {stops:?}",
-        run.frames, run.lag, run.split, run.pieces
+        "{matches} matches ({} played to the end), {} frames identical ({} lag, {} split), {} pairs dealt; stopped at: {stops:?}",
+        run.finished, run.frames, run.lag, run.split, run.pieces
     );
 }

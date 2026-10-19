@@ -19,7 +19,9 @@ use super::motion::{cos, sin, Motion};
 use super::pair::{PadInput, Pair, RotateKeys, Step};
 use super::rng::Rng;
 
+mod ending;
 mod stage;
+pub use ending::*;
 pub use stage::*;
 
 pub const SLOTS: usize = 64;
@@ -96,6 +98,15 @@ pub enum Actor {
     Portrait(Portrait),
     PortraitPalette(PortraitPalette),
     PaletteFade(PaletteFade),
+    Star(Star),
+    StarSpark(StarSpark),
+    Banner(Banner),
+    FieldWipe(FieldWipe),
+    FallingColumn(FallingColumn),
+    PasswordBean(PasswordBean),
+    ContinueSign(ContinueSign),
+    BouncingBean(BouncingBean),
+    BounceSparkle(BounceSparkle),
 }
 
 impl Actor {
@@ -110,6 +121,10 @@ impl Actor {
                 | Actor::OpaqueQuick
                 | Actor::Sparkle(_)
                 | Actor::DangerSpark(_)
+                | Actor::Star(_)
+                | Actor::StarSpark(_)
+                | Actor::BouncingBean(_)
+                | Actor::BounceSparkle(_)
         )
     }
 
@@ -138,6 +153,15 @@ impl Actor {
             Actor::Portrait(_) => Some(PORTRAIT_CODE),
             Actor::PortraitPalette(_) => Some(PORTRAIT_PALETTE_CODE),
             Actor::PaletteFade(_) => Some(PALETTE_FADE_CODE),
+            Actor::Star(s) => Some(s.state.code()),
+            Actor::StarSpark(_) => Some(STAR_SPARK_CODE),
+            Actor::Banner(b) => Some(b.state.code()),
+            Actor::FieldWipe(_) => Some(FIELD_WIPE_CODE),
+            Actor::FallingColumn(c) => Some(if c.falling { 0x838A } else { 0x8386 }),
+            Actor::PasswordBean(_) => Some(PASSWORD_BEAN_CODE),
+            Actor::ContinueSign(_) => Some(CONTINUE_SIGN_CODE),
+            Actor::BouncingBean(b) => Some(b.state.code()),
+            Actor::BounceSparkle(_) => Some(BOUNCE_SPARKLE_CODE),
         }
     }
 }
@@ -170,6 +194,35 @@ pub enum PlayerState {
     Spawn,
     /// $3EFA: pops found; score this step (`sub_9A56`).
     PopScore,
+    /// $7A12: the pair couldn't spawn; who won, stars, the field falls away.
+    TopOut,
+    /// $7A1E: until the field's actors are done, then clear it.
+    Wipe,
+    /// $7A3C: on to the results.
+    Cleared,
+    /// $7D90 / $7D96: a pause (a button skips it), then the time is shown.
+    ResultsWait,
+    ResultsShown,
+    /// $7DA4 / $7DAA: then the bonus, if any.
+    BonusWait,
+    Bonus,
+    /// $7DEE / $7DF4: count the bonus into the score (a button finishes it).
+    TallyWait,
+    Tally,
+    /// $7E50 / $7E56: no bonus: a pause, then the password.
+    NoBonusWait,
+    NoBonus,
+    /// $7EA4: wait for a button.
+    Continue,
+    /// $7EB0 / $7EB8: done; the game flow takes over.
+    Leave,
+    Done,
+    /// $7ED6: P1 lost: "continue?" for $80 frames (a button skips).
+    ContinueWait,
+    /// $7EDC: the high score table; $7EF6: then clear the field; $7F1A: done.
+    HighScore,
+    ContinueCheck,
+    ContinueDone,
     /// $3F06: back up the field, start blinking.
     PopBackup,
     /// $3F12: blink the popping beans for 24 frames (`sub_49D2`).
@@ -202,6 +255,24 @@ impl PlayerState {
             PlayerState::PreSpawn3 => 0x3E1A,
             PlayerState::Spawn => 0x3E44,
             PlayerState::PopScore => 0x3EFA,
+            PlayerState::TopOut => 0x7A12,
+            PlayerState::Wipe => 0x7A1E,
+            PlayerState::Cleared => 0x7A3C,
+            PlayerState::ResultsWait => 0x7D90,
+            PlayerState::ResultsShown => 0x7D96,
+            PlayerState::BonusWait => 0x7DA4,
+            PlayerState::Bonus => 0x7DAA,
+            PlayerState::TallyWait => 0x7DEE,
+            PlayerState::Tally => 0x7DF4,
+            PlayerState::NoBonusWait => 0x7E50,
+            PlayerState::NoBonus => 0x7E56,
+            PlayerState::Continue => 0x7EA4,
+            PlayerState::Leave => 0x7EB0,
+            PlayerState::Done => 0x7EB8,
+            PlayerState::ContinueWait => 0x7ED6,
+            PlayerState::HighScore => 0x7EDC,
+            PlayerState::ContinueCheck => 0x7EF6,
+            PlayerState::ContinueDone => 0x7F1A,
             PlayerState::PopBackup => 0x3F06,
             PlayerState::Blink => 0x3F12,
             PlayerState::PopSpawn => 0x3F1A,
@@ -254,6 +325,8 @@ pub struct Player {
     /// The other player's actor (+$2E) and this player's pair holder (+$32).
     pub other_slot: usize,
     pub holder_slot: Option<usize>,
+    /// +$28: the bonus counted per frame in the results.
+    pub w28: u16,
     /// Work for the chain step in progress.
     pub pop: Option<PopWork>,
 }
@@ -291,6 +364,8 @@ pub enum PivotState {
     Init,
     /// $4F14: under the player's control.
     Controlled,
+    /// $4F4E: stopped and hidden (its player is gone).
+    Hidden,
     /// $4F8A: dropping further on its own (`sub_4948`).
     Falling,
     /// $4FA8: landing animation, then written to the field.
@@ -302,6 +377,7 @@ impl PivotState {
         match self {
             PivotState::Init => 0x4F06,
             PivotState::Controlled => 0x4F14,
+            PivotState::Hidden => 0x4F4E,
             PivotState::Falling => 0x4F8A,
             PivotState::Squash => 0x4FA8,
         }
@@ -379,6 +455,8 @@ impl Fall {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Pivot {
     pub player_slot: usize,
+    /// +$2A: the player it belongs to (which field it lands in).
+    pub player_id: u8,
     pub satellite_slot: usize,
     pub color: BeanColor,
     pub state: PivotState,
@@ -404,6 +482,7 @@ impl Pivot {
 pub struct Satellite {
     pub pivot_slot: usize,
     pub player_slot: usize,
+    pub player_id: u8,
     pub color: BeanColor,
     pub state: SatelliteState,
     /// After the pivot lands: own column/row, copied flags, animation, fall.
@@ -810,6 +889,22 @@ pub struct Engine {
     pub portrait_lock: u16,
     /// The generation word of each palette line's fade (`pal_fade_data`, $82 apart).
     pub pal_fade_gen: [u16; 4],
+    /// `difficulty` (the option: 0-3) and `byte_FF0114` (stages the time bonus allows for).
+    pub difficulty_option: u8,
+    pub bonus_level: u8,
+    /// Results: `bytecode_flag` (the winner), `dword_FF195C` (score with the bonus),
+    /// `dword_FF1960` (beans popped), `current_password`.
+    pub bytecode_flag: u8,
+    pub result_score: u32,
+    pub result_beans: u16,
+    pub password: u16,
+    /// Plane command $9E (`SpecPlane9E`) queued for the next vertical blank.
+    pub password_command: bool,
+    /// The match is over and the game flow has taken over (`bytecode_disabled` cleared).
+    pub match_over: bool,
+    /// `high_scores` (a table of 5 x 16 bytes per mode) and `high_score_table_id`.
+    pub high_scores: Vec<u8>,
+    pub high_score_table: u8,
 }
 
 impl Engine {
@@ -850,6 +945,16 @@ impl Engine {
             danger_flash: 0,
             portrait_lock: 0,
             pal_fade_gen: [0; 4],
+            difficulty_option: 0,
+            bonus_level: 0,
+            bytecode_flag: 0,
+            result_score: 0,
+            result_beans: 0,
+            password: 0,
+            password_command: false,
+            match_over: false,
+            high_scores: vec![0; 0x140],
+            high_score_table: 0,
         }
     }
 
@@ -946,6 +1051,9 @@ impl Engine {
         for slot in std::mem::take(&mut self.fall_commands) {
             self.run_fall_command(slot);
         }
+        if std::mem::take(&mut self.password_command) {
+            self.run_password_command();
+        }
         self.random();
         // HandleTime
         if (self.player_flags[0] | self.player_flags[1]) & 0x80 == 0 {
@@ -994,6 +1102,15 @@ impl Engine {
                 Actor::Portrait(pt) => self.run_portrait(pt).map(Actor::Portrait),
                 Actor::PortraitPalette(pt) => self.run_portrait_palette(pt).map(Actor::PortraitPalette),
                 Actor::PaletteFade(pf) => self.run_palette_fade(pf).map(Actor::PaletteFade),
+                Actor::Star(st) => self.run_star(st).map(Actor::Star),
+                Actor::StarSpark(sp) => self.run_star_spark(sp).map(Actor::StarSpark),
+                Actor::Banner(b) => self.run_banner(b).map(Actor::Banner),
+                Actor::FieldWipe(w) => self.run_field_wipe(w).map(Actor::FieldWipe),
+                Actor::FallingColumn(c) => self.run_falling_column(c)?.map(Actor::FallingColumn),
+                Actor::PasswordBean(b) => self.run_password_bean(b).map(Actor::PasswordBean),
+                Actor::ContinueSign(c) => self.run_continue_sign(c).map(Actor::ContinueSign),
+                Actor::BouncingBean(b) => self.run_bouncing_bean(b).map(Actor::BouncingBean),
+                Actor::BounceSparkle(sp) => self.run_bounce_sparkle(sp).map(Actor::BounceSparkle),
             };
             self.slots[slot] = next;
         }
@@ -1152,11 +1269,30 @@ impl Engine {
                 p.state = Spawn;
             }
             Spawn => {
-                self.spawn_pair(slot, &mut p, inputs)?;
-                p.state = WaitPair;
+                if self.spawn_pair(slot, &mut p, inputs)? {
+                    p.state = WaitPair;
+                } else {
+                    self.top_out(&mut p)?;
+                }
+            }
+            TopOut => self.announce_result(&mut p)?,
+            Wipe | Cleared | ResultsWait | ResultsShown | BonusWait | Bonus | TallyWait | Tally | NoBonusWait | NoBonus
+            | Continue | Leave | Done | ContinueWait | HighScore | ContinueCheck | ContinueDone => {
+                if !self.run_results(&mut p, inputs)? {
+                    return Ok(None);
+                }
             }
         }
         Ok(Some(p))
+    }
+
+    /// `loc_4F3A`: the pair stops (hidden) when its player's pivot flag goes; from then
+    /// on it just waits ($4F4E).
+    fn hide_pair(&mut self, mut v: Pivot) -> Pivot {
+        if v.state == PivotState::Controlled {
+            v.state = PivotState::Hidden;
+        }
+        v
     }
 
     /// `loc_3DB0`: the chain (if any) is over; drop this player's pending garbage,
@@ -1604,11 +1740,10 @@ impl Engine {
     }
 
     /// `sub_4E24`: the next pair at column 2, row 2, satellite above.
-    fn spawn_pair(&mut self, player_slot: usize, p: &mut Player, inputs: &Inputs) -> Result<(), Unported> {
+    /// `sub_4E24`: deal the next pair and spawn it. Ok(false) when the spawn cell is
+    /// taken (the pair was still dealt).
+    fn spawn_pair(&mut self, player_slot: usize, p: &mut Player, inputs: &Inputs) -> Result<bool, Unported> {
         let id = p.id as usize;
-        if self.fields[id].get(2, 2).is_some() {
-            return Err(Unported("game over (spawn cell filled)"));
-        }
         let holder = p.holder_slot.filter(|&h| matches!(self.slots[h], Some(Actor::PairHolder(_))));
         let (pivot_color, sat_color) = match holder {
             Some(h) => {
@@ -1618,6 +1753,9 @@ impl Engine {
             }
             None => inputs.next_pair[id].ok_or(Unported("no next pair given"))?,
         };
+        if self.fields[id].get(2, 2).is_some() {
+            return Ok(false);
+        }
         let (pivot_slot, sat_slot) = match inputs.spawn_slots[id] {
             Some(slots) => slots,
             None => {
@@ -1636,6 +1774,7 @@ impl Engine {
         };
         self.slots[pivot_slot] = Some(Actor::Pivot(Pivot {
             player_slot,
+            player_id: p.id,
             satellite_slot: sat_slot,
             color: pivot_color,
             state: PivotState::Init,
@@ -1647,6 +1786,7 @@ impl Engine {
         self.slots[sat_slot] = Some(Actor::Satellite(Satellite {
             pivot_slot,
             player_slot,
+            player_id: p.id,
             color: sat_color,
             state: SatelliteState::Init,
             col: 0,
@@ -1657,23 +1797,31 @@ impl Engine {
             fall: Fall::default(),
         }));
         p.flags |= flag::PIVOT_ACTIVE | flag::SATELLITE_ACTIVE;
-        Ok(())
+        Ok(true)
     }
 
     fn run_pivot(&mut self, _slot: usize, mut v: Pivot, inputs: &Inputs) -> Result<Option<Actor>, Unported> {
-        let (id, player_flags, fall_speed, mut plan) = {
-            let p = self.player_mut(v.player_slot);
-            (p.id as usize, p.flags, p.fall_speed, player_plan(p))
+        // The player can be gone (deleted when the other side won): a controlled pair
+        // then sees its flags as 0 and stops; a landing one carries on.
+        let player = match &self.slots[v.player_slot] {
+            Some(Actor::Player(p)) => Some((p.flags, p.fall_speed, player_plan(p))),
+            _ => None,
         };
+        if player.is_none() && matches!(v.state, PivotState::Controlled | PivotState::Hidden) {
+            return Ok(Some(Actor::Pivot(self.hide_pair(v))));
+        }
+        let (player_flags, fall_speed, mut plan) = player.unwrap_or_default();
+        let id = v.player_id as usize & 1;
         let cpu = self.is_cpu(id as u8);
         match v.state {
+            PivotState::Hidden => {}
             PivotState::Init => {
                 v.place();
                 v.state = PivotState::Controlled;
             }
             PivotState::Controlled => {
                 if player_flags & flag::PIVOT_ACTIVE == 0 {
-                    return Err(Unported("pair hidden while in play (loc_4F3A)"));
+                    return Ok(Some(Actor::Pivot(self.hide_pair(v))));
                 }
                 let step = if cpu {
                     let before = self.rng;
@@ -1735,7 +1883,9 @@ impl Engine {
             }
             PivotState::Squash => {
                 if v.pair.pivot_anim.step() {
-                    self.player_mut(v.player_slot).flags &= !flag::PIVOT_ACTIVE;
+                    if let Some(Actor::Player(p)) = self.slots[v.player_slot].as_mut() {
+                        p.flags &= !flag::PIVOT_ACTIVE;
+                    }
                     self.mark(id, v.pair.col, v.pair.row, v.color);
                     return Ok(Some(Actor::Effect(Effect::new(id as u8, v.y))));
                 }
@@ -1778,7 +1928,7 @@ impl Engine {
                 }
             }
             SatelliteState::Falling => {
-                let id = self.player_mut(s.player_slot).id as usize;
+                let id = s.player_id as usize & 1;
                 let mut row = s.row;
                 if s.fall.step(&self.fields[id], s.col, &mut row) {
                     s.anim.ptr = script::SQUASH;
@@ -1789,11 +1939,10 @@ impl Engine {
             }
             SatelliteState::Squash => {
                 if s.anim.step() {
-                    let id = {
-                        let p = self.player_mut(s.player_slot);
+                    if let Some(Actor::Player(p)) = self.slots[s.player_slot].as_mut() {
                         p.flags &= !flag::SATELLITE_ACTIVE;
-                        p.id as usize
-                    };
+                    }
+                    let id = s.player_id as usize & 1;
                     self.mark(id, s.col, s.row, s.color);
                     return Ok(Some(Actor::Effect(Effect::new(id as u8, s.y))));
                 }

@@ -120,6 +120,24 @@ pub fn load(ram: &Ram, slot: usize, tag: u8) -> Option<Actor> {
         PlayerState::Compact,
         PlayerState::FallWait,
         PlayerState::ChainNext,
+        PlayerState::TopOut,
+        PlayerState::Wipe,
+        PlayerState::Cleared,
+        PlayerState::ResultsWait,
+        PlayerState::ResultsShown,
+        PlayerState::BonusWait,
+        PlayerState::Bonus,
+        PlayerState::TallyWait,
+        PlayerState::Tally,
+        PlayerState::NoBonusWait,
+        PlayerState::NoBonus,
+        PlayerState::Continue,
+        PlayerState::Leave,
+        PlayerState::Done,
+        PlayerState::ContinueWait,
+        PlayerState::HighScore,
+        PlayerState::ContinueCheck,
+        PlayerState::ContinueDone,
     ]
     .into_iter()
     .find(|s| s.code() == code);
@@ -138,6 +156,7 @@ pub fn load(ram: &Ram, slot: usize, tag: u8) -> Option<Actor> {
             pause_frames: ram.u8(a + 0x2D),
             other_slot: slot_of(ram.u32(a + 0x2E)),
             holder_slot: slot_at(ram.u32(a + 0x32)),
+            w28: ram.u16(a + 0x28),
             pending_garbage: ram.u16(a + 0x14),
             speed_index: ram.u8(a + 0x08),
             score: ram.u32(a + 0x0A),
@@ -151,13 +170,14 @@ pub fn load(ram: &Ram, slot: usize, tag: u8) -> Option<Actor> {
             pop: None,
         }));
     }
-    if code == PivotState::Controlled.code() {
+    if code == PivotState::Controlled.code() || code == PivotState::Hidden.code() {
         let sat = ram.u32(a + 0x36);
         return Some(Actor::Pivot(Pivot {
             player_slot: slot_of(ram.u32(a + 0x2E)),
+            player_id: ram.u8(a + 0x2A),
             satellite_slot: slot_of(sat),
             color: color(ram, a),
-            state: PivotState::Controlled,
+            state: if code == PivotState::Hidden.code() { PivotState::Hidden } else { PivotState::Controlled },
             pair: Pair {
                 col: ram.u16(a + 0x1A),
                 row: ram.u16(a + 0x1C),
@@ -182,6 +202,7 @@ pub fn load(ram: &Ram, slot: usize, tag: u8) -> Option<Actor> {
         let sat = ram.u32(a + 0x36);
         return Some(Actor::Pivot(Pivot {
             player_slot: slot_of(ram.u32(a + 0x2E)),
+            player_id: ram.u8(a + 0x2A),
             satellite_slot: slot_of(sat),
             color: color(ram, a),
             state,
@@ -203,6 +224,7 @@ pub fn load(ram: &Ram, slot: usize, tag: u8) -> Option<Actor> {
         return Some(Actor::Satellite(Satellite {
             pivot_slot: usize::MAX,
             player_slot: slot_of(ram.u32(a + 0x2E)),
+            player_id: ram.u8(a + 0x2A),
             color: color(ram, a),
             state,
             col: ram.u16(a + 0x1A),
@@ -351,6 +373,62 @@ fn load_stage(ram: &Ram, a: u32, code: u32) -> Option<Actor> {
             speed: ram.u16(a + 0x28),
             steps: ram.u16(a + 0x2A),
         }),
+        0x7104 | 0x710E | 0x7114 | 0x7132 | 0x714E | 0x7152 => Actor::Star(Star {
+            state: [StarState::Init, StarState::Wait, StarState::Delay, StarState::Rise, StarState::Pause, StarState::Burst]
+                .into_iter()
+                .find(|s| s.code() == code)
+                .unwrap(),
+            motion: motion_at(ram, a),
+            draw: ram.u8(a + 6),
+            color: ram.u8(a + 8),
+            frame: ram.u8(a + 9),
+            timer: ram.u16(a + 0x26),
+            delay: ram.u16(a + 0x24),
+        }),
+        STAR_SPARK_CODE => Actor::StarSpark(StarSpark { motion: motion_at(ram, a), draw: ram.u8(a + 6), anim: anim_from(ram, a) }),
+        0x72A4 | 0x72B0 | 0x72D0 => Actor::Banner(Banner {
+            state: [BannerState::Start, BannerState::Count, BannerState::Hold].into_iter().find(|s| s.code() == code).unwrap(),
+            timer: ram.u16(a + 0x26),
+        }),
+        FIELD_WIPE_CODE => Actor::FieldWipe(FieldWipe { parent: slot_of(ram.u32(a + 0x2E)), anim: anim_from(ram, a), shown: ram.u8(a + 8) }),
+        0x8386 | 0x838A => Actor::FallingColumn(FallingColumn {
+            parent: slot_of(ram.u32(a + 0x2E)),
+            falling: code == 0x838A,
+            motion: motion_at(ram, a),
+            draw: ram.u8(a + 6),
+            color: ram.u8(a + 8),
+            delay: ram.u16(a + 0x24),
+            scroll: ram.u16(a + 0x32),
+        }),
+        CONTINUE_SIGN_CODE => Actor::ContinueSign(ContinueSign {
+            parent: slot_of(ram.u32(a + 0x2E)),
+            x: ram.u16(a + 0x0A),
+            y: ram.u16(a + 0x0E),
+            target_y: ram.u16(a + 0x20),
+            anim: anim_from(ram, a),
+        }),
+        0x8490 | 0x84A4 | 0x84D2 => Actor::BouncingBean(BouncingBean {
+            state: [BounceState::Wait, BounceState::Fly, BounceState::Gone].into_iter().find(|s| s.code() == code).unwrap(),
+            motion: motion_at(ram, a),
+            draw: ram.u8(a + 6),
+            color: ram.u8(a + 8),
+            frame: ram.u8(a + 9),
+            angle: ram.u8(a + 0x36),
+            timer: ram.u16(a + 0x26),
+            followed: ram.u8(a + 7) != 0,
+        }),
+        BOUNCE_SPARKLE_CODE => Actor::BounceSparkle(BounceSparkle {
+            bean: slot_of(ram.u32(a + 0x2E)),
+            x: ram.u16(a + 0x0A),
+            y: ram.u16(a + 0x0E),
+            anim: anim_from(ram, a),
+        }),
+        PASSWORD_BEAN_CODE => Actor::PasswordBean(PasswordBean {
+            color: ram.u8(a + 8),
+            x: ram.u16(a + 0x0A),
+            y: ram.u16(a + 0x0E),
+            anim: anim_from(ram, a),
+        }),
         PORTRAIT_PALETTE_CODE => Actor::PortraitPalette(PortraitPalette {
             wait: ram.u8(a + 0x22),
             step: ram.u16(a + 0x26),
@@ -365,8 +443,9 @@ pub fn describe(actor: &Actor) -> String {
     match actor {
         Actor::Opaque | Actor::OpaqueQuick | Actor::Vanishing => "opaque".into(),
         Actor::Player(p) => format!(
-            "player {:04X} flags {:02X} delay {} chain {} score {} acc {} base {} bonus {} beans {}/{} speed {:04X} step {} next {} w26 {:04X} cpu {:?} {} {} links {:X} {:?}",
+            "player {:04X} id {} flags {:02X} delay {} chain {} score {} acc {} base {} bonus {} beans {}/{} speed {:04X} step {} next {} w26 {:04X} w28 {:04X} cpu {:?} {} {} links {:X} {:?}",
             p.state.code(),
+            p.id,
             p.flags & 0x17,
             p.delay,
             p.chain,
@@ -380,6 +459,7 @@ pub fn describe(actor: &Actor) -> String {
             p.speed_index,
             p.threshold,
             p.w26,
+            p.w28,
             p.target,
             p.move_frames,
             p.pause_frames,
@@ -387,7 +467,7 @@ pub fn describe(actor: &Actor) -> String {
             p.holder_slot,
         ),
         Actor::Pivot(v) => match v.state {
-            PivotState::Init => format!("pivot {:04X}", v.state.code()),
+            PivotState::Init | PivotState::Hidden => format!("pivot {:04X}", v.state.code()),
             PivotState::Controlled => format!("pivot {:04X} {:?}", v.state.code(), v.pair),
             _ => format!(
                 "pivot {:04X} col {} row {} y {:08X} vel {:08X} anim {:?} flags {:02X}",
@@ -441,6 +521,27 @@ pub fn describe(actor: &Actor) -> String {
         ),
         Actor::Portrait(pt) => format!("portrait level {:04X} base {} wait {} shown {} next {:X}", pt.level, pt.base, pt.wait, pt.shown, pt.next),
         Actor::PaletteFade(pf) => format!("palette fade line {} gen {} timer {} speed {} steps {}", pf.line, pf.flag, pf.timer, pf.speed, pf.steps),
+        Actor::Star(st) => format!(
+            "star {:04X} pos {:08X},{:08X} vel {:08X},{:08X} draw {:02X} color {:02X} frame {} timer {} delay {}",
+            st.state.code(), st.motion.x, st.motion.y, st.motion.vx, st.motion.vy, st.draw, st.color, st.frame, st.timer, st.delay
+        ),
+        Actor::StarSpark(sp) => format!(
+            "star spark pos {:08X},{:08X} vel {:08X},{:08X} draw {:02X} anim {:?}",
+            sp.motion.x, sp.motion.y, sp.motion.vx, sp.motion.vy, sp.draw, sp.anim
+        ),
+        Actor::Banner(b) => format!("banner {:04X} timer {}", b.state.code(), b.timer),
+        Actor::FieldWipe(w) => format!("field wipe parent {:X} anim {:?} shown {:02X}", w.parent, w.anim, w.shown),
+        Actor::FallingColumn(c) => format!(
+            "falling column {} parent {:X} pos {:08X},{:08X} vel {:08X},{:08X} draw {:02X} color {} delay {} scroll {:X}",
+            if c.falling { "838A" } else { "8386" }, c.parent, c.motion.x, c.motion.y, c.motion.vx, c.motion.vy, c.draw, c.color, c.delay, c.scroll
+        ),
+        Actor::ContinueSign(c) => format!("continue sign parent {:X} at {:X},{:X} target {:X} anim {:?}", c.parent, c.x, c.y, c.target_y, c.anim),
+        Actor::BouncingBean(b) => format!(
+            "bouncing bean {:04X} pos {:08X},{:08X} vel {:08X},{:08X} draw {:02X} color {} frame {} angle {:02X} timer {} followed {}",
+            b.state.code(), b.motion.x, b.motion.y, b.motion.vx, b.motion.vy, b.draw, b.color, b.frame, b.angle, b.timer, b.followed
+        ),
+        Actor::BounceSparkle(sp) => format!("bounce sparkle bean {:X} at {:X},{:X} anim {:?}", sp.bean, sp.x, sp.y, sp.anim),
+        Actor::PasswordBean(b) => format!("password bean color {:02X} at {:X},{:X} anim {:?}", b.color, b.x, b.y, b.anim),
         Actor::PortraitPalette(pt) => format!("portrait palette wait {} step {:04X} level {}", pt.wait, pt.step, pt.level),
         Actor::Glow(g) => format!(
             "glow {:05X} chain {} pos {:08X},{:08X} vel {:08X},{:08X} base {:X} counter {:04X} draw {:02X} delay {} anim {:?}",
