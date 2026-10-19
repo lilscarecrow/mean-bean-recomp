@@ -9,6 +9,7 @@ pub mod actors;
 pub mod anim;
 pub mod bean_order;
 pub mod field;
+pub mod motion;
 pub mod pair;
 pub mod rng;
 

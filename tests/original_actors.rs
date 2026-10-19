@@ -8,9 +8,13 @@ mod support;
 use bean_machine::mbm::actors::*;
 use bean_machine::mbm::anim::Anim;
 use bean_machine::mbm::field::Field;
+use bean_machine::mbm::motion::Motion;
+use bean_machine::mbm::Rng;
 use bean_machine::mbm::pair::{PadInput, Pair, RotateKeys};
 use bean_machine::mbm::BeanColor;
 use support::{frames, recordings, Ram, FRAME_COUNT, P1, P1_CTRL, P1_KEYS, P2};
+
+const RNG_SEED: u32 = 0xFF_1116;
 
 const ACTORS: u32 = 0xFF_E000;
 
@@ -22,8 +26,10 @@ fn slot_of(addr: u32) -> usize {
     ((addr - ACTORS) / 0x40) as usize
 }
 
+/// A slot is taken when its first word is nonzero (`FindActorSlotQuick`'s test; only
+/// `FindActorSlot` also sets bit 7 of the second byte).
 fn used(ram: &Ram, slot: usize) -> bool {
-    ram.u8(slot_addr(slot) + 1) & 0x80 != 0
+    ram.u16(slot_addr(slot)) != 0
 }
 
 fn anim_from(ram: &Ram, a: u32) -> Anim {
@@ -127,6 +133,55 @@ fn load(ram: &Ram, slot: usize, tag: u8) -> Option<Actor> {
             fall: fall_from(ram, a),
         }));
     }
+    let motion = || Motion {
+        x: ram.u32(a + 0x0A),
+        y: ram.u32(a + 0x0E),
+        vx: ram.u32(a + 0x12),
+        vy: ram.u32(a + 0x16),
+        ax: ram.u16(a + 0x1A),
+        ay: ram.u16(a + 0x1C),
+        tx: ram.u16(a + 0x1E),
+        ty: ram.u16(a + 0x20),
+    };
+    if let Some(state) = [BurstState::Wait, BurstState::Burst, BurstState::Animate].into_iter().find(|s| s.code() == code) {
+        return Some(Actor::Burst(Burst {
+            player: ram.u8(a + 0x2A),
+            color: ram.u8(a + 8),
+            x: ram.u16(a + 0x0A),
+            y: ram.u16(a + 0x0E),
+            delay: ram.u16(a + 0x24),
+            anim: anim_from(ram, a),
+            state,
+        }));
+    }
+    if let Some(state) = [PieceState::Start, PieceState::Wait, PieceState::Fly].into_iter().find(|s| s.code() == code) {
+        return Some(Actor::Piece(Piece {
+            player: 0,
+            color: ram.u8(a + 8),
+            motion: motion(),
+            draw: ram.u8(a + 6),
+            delay: ram.u16(a + 0x24),
+            anim: anim_from(ram, a),
+            state,
+        }));
+    }
+    if code == 0x4DA4 {
+        return Some(Actor::GarbageClear(GarbageClear { player: 0, x: ram.u16(a + 0x0A), y: ram.u16(a + 0x0E), anim: anim_from(ram, a) }));
+    }
+    let glow_states = [GlowState::Start, GlowState::Hover, GlowState::HoverWait, GlowState::Launch, GlowState::Fly, GlowState::End];
+    if let Some(state) = glow_states.into_iter().find(|s| s.code() == code) {
+        return Some(Actor::Glow(Glow {
+            player: ram.u8(a + 0x2A),
+            chain: ram.u8(a + 0x2B),
+            motion: motion(),
+            draw: ram.u8(a + 6),
+            base_x: ram.u16(a + 0x1E),
+            counter: ram.u16(a + 0x26),
+            delay: ram.u16(a + 0x24),
+            anim: anim_from(ram, a),
+            state,
+        }));
+    }
     let effect_state = [EffectState::Wait, EffectState::Start, EffectState::Rise].into_iter().find(|s| s.code() == code);
     effect_state.map(|state| {
         Actor::Effect(Effect {
@@ -143,7 +198,7 @@ fn load(ram: &Ram, slot: usize, tag: u8) -> Option<Actor> {
 /// The parts of a ported actor the ROM's RAM must agree with.
 fn describe(actor: &Actor) -> String {
     match actor {
-        Actor::Opaque => "opaque".into(),
+        Actor::Opaque | Actor::OpaqueQuick | Actor::Vanishing => "opaque".into(),
         Actor::Player(p) => format!(
             "player {:04X} flags {:02X} delay {} chain {} score {} acc {} base {} bonus {} beans {}/{} speed {:04X} step {} next {} w26 {:04X}",
             p.state.code(),
@@ -176,6 +231,16 @@ fn describe(actor: &Actor) -> String {
             ),
         },
         Actor::Effect(e) => format!("effect {:04X} delay {} steps {} ticks {} y {:08X}", e.state.code(), e.delay, e.steps_left, e.ticks, e.y),
+        Actor::Burst(b) => format!("burst {:04X} color {} at {:X},{:X} delay {} anim {:?}", b.state.code(), b.color, b.x, b.y, b.delay, b.anim),
+        Actor::Piece(p) => format!(
+            "piece {:04X} color {} pos {:08X},{:08X} vel {:08X},{:08X} draw {:02X} delay {} anim {:?}",
+            p.state.code(), p.color, p.motion.x, p.motion.y, p.motion.vx, p.motion.vy, p.draw, p.delay, p.anim
+        ),
+        Actor::GarbageClear(g) => format!("garbage clear at {:X},{:X} anim {:?}", g.x, g.y, g.anim),
+        Actor::Glow(g) => format!(
+            "glow {:05X} chain {} pos {:08X},{:08X} vel {:08X},{:08X} base {:X} counter {:04X} draw {:02X} delay {} anim {:?}",
+            g.state.code(), g.chain, g.motion.x, g.motion.y, g.motion.vx, g.motion.vy, g.base_x, g.counter, g.draw, g.delay, g.anim
+        ),
     }
 }
 
@@ -194,6 +259,35 @@ fn describe_ram(ram: &Ram, slot: usize, tag: u8, ours: &Actor) -> Option<String>
 }
 
 
+/// Ways to place `n` foreign random draws in the gaps before each of `gaps` actors of
+/// ours (the rest come after the last one, where they can't affect us).
+fn splits(n: u32, gaps: usize) -> Vec<Vec<u32>> {
+    if gaps == 0 {
+        return vec![vec![]];
+    }
+    let mut out = vec![];
+    for first in 0..=n {
+        for mut rest in splits(n - first, gaps - 1) {
+            rest.insert(0, first);
+            out.push(rest);
+        }
+    }
+    out
+}
+
+/// Resume addresses of every actor state the port knows.
+fn known_code(code: u32) -> bool {
+    matches!(code, 0x3D00..=0x40FF | 0x4F06 | 0x4F14 | 0x5474 | 0x5482) || load_codes().contains(&code)
+}
+
+fn load_codes() -> Vec<u32> {
+    let mut v = vec![0x4F8A, 0x4FA8, 0x54D4, 0x54FA, 0x5514, 0x4FCE, 0x4FE6, 0x4FF4, 0x4DA4];
+    v.extend([BurstState::Wait, BurstState::Burst, BurstState::Animate].map(|s| s.code()));
+    v.extend([PieceState::Start, PieceState::Wait, PieceState::Fly].map(|s| s.code()));
+    v.extend([GlowState::Start, GlowState::Hover, GlowState::HoverWait, GlowState::Launch, GlowState::Fly, GlowState::End].map(|s| s.code()));
+    v
+}
+
 /// Does the ROM's RAM show the ported actor in `slot` as we have it?
 fn slot_matches(engine: &Engine, cur: &Ram, tag: u8, slot: usize) -> Result<(), String> {
     match &engine.slots[slot] {
@@ -203,7 +297,7 @@ fn slot_matches(engine: &Engine, cur: &Ram, tag: u8, slot: usize) -> Result<(), 
             }
             Ok(())
         }
-        Some(Actor::Opaque) => Ok(()),
+        Some(Actor::Opaque) | Some(Actor::OpaqueQuick) | Some(Actor::Vanishing) => Ok(()),
         Some(ours) => {
             let mut want = describe_ram(cur, slot, tag, ours);
             let mut got = describe(ours);
@@ -242,16 +336,6 @@ fn first_mismatch(engine: &Engine, cur: &Ram, tag: u8, player: usize) -> Option<
     })
 }
 
-/// The ROM's logic overran the video frame and the snapshot caught `RunActors` halfway:
-/// slots below some cut show the new frame, slots from the cut on still show the old one.
-fn split_frame(before: &Engine, after: &Engine, cur: &Ram, tag: u8, player: usize) -> bool {
-    let field_ok = field_matches(before, cur, player) || field_matches(after, cur, player);
-    field_ok
-        && (0..=SLOTS).any(|cut| {
-            (0..cut).all(|s| slot_matches(after, cur, tag, s).is_ok())
-                && (cut..SLOTS).all(|s| slot_matches(before, cur, tag, s).is_ok())
-        })
-}
 
 #[derive(Default)]
 struct Stats {
@@ -264,6 +348,11 @@ struct Stats {
     pop_frames: usize,
     chained_pieces: usize,
     longest_chain: u8,
+    rng_frames: usize,
+    rng_calls: usize,
+    rng_foreign: usize,
+    rng_resolved: usize,
+    visuals: std::collections::BTreeMap<&'static str, usize>,
 }
 
 #[test]
@@ -290,9 +379,12 @@ fn between_pieces_matches_the_original_frame_by_frame() {
         }
     }
     eprintln!(
-        "{} pieces, {} frames identical ({} with a physics fall, {} lag and {} split frames);          {} pieces popped ({} frames in pop states, longest chain {}); stopped at unported: {:?}",
+        "{} pieces, {} frames identical ({} with a physics fall, {} lag and {} split frames);          {} pieces popped ({} frames in pop states, longest chain {}); stopped at unported: {:?}\n\
+         random: {} frames fully accounted ({} calls), {} frames with calls by unported actors ({} needed a split)\n\
+         pop visuals (actor-frames): {:?}",
         stats.pieces, stats.frames, stats.falls, stats.lag_frames, stats.split_frames,
-        stats.chained_pieces, stats.pop_frames, stats.longest_chain, stats.unported
+        stats.chained_pieces, stats.pop_frames, stats.longest_chain, stats.unported,
+        stats.rng_frames, stats.rng_calls, stats.rng_foreign, stats.rng_resolved, stats.visuals
     );
     assert!(stats.pieces > 0 || std::env::var_os("MBM_REQUIRE_RECORDINGS").is_none());
 }
@@ -313,8 +405,11 @@ fn check_piece(
     engine.fields[player] = Field::from_words(&ram.field_words(player));
     engine.level_mode = ram.u8(0xFF_1964);
     engine.difficulty = ram.u8(0xFF_0104);
+    engine.glow_xy = (ram.u16(0xFF_19AC), ram.u16(0xFF_19AE));
     for slot in 0..SLOTS {
-        engine.slots[slot] = load(ram, slot, tag).or_else(|| used(ram, slot).then_some(Actor::Opaque));
+        engine.slots[slot] = load(ram, slot, tag).or_else(|| {
+            used(ram, slot).then_some(if ram.u8(slot_addr(slot) + 1) & 0x80 == 0 { Actor::OpaqueQuick } else { Actor::Opaque })
+        });
     }
     if !engine.slots.iter().any(|s| matches!(s, Some(Actor::Player(_)))) {
         return None; // player actor not in a ported state (e.g. mid-chain)
@@ -335,13 +430,19 @@ fn check_piece(
     let mut chain_seen = 0u8;
     // True when the last snapshot caught the ROM halfway through a logic frame: the next
     // snapshot finishes that same frame (see `split_frame`).
-    let mut finishing = false;
+    let mut finishing: Option<usize> = None;
     for f in start + 1..=spawn + 1 {
         let (prev, cur) = (&all[f - 1], &all[f]);
-        if finishing {
-            finishing = false;
+        if let Some(cut) = finishing.take() {
+            // The ROM's vertical blank came mid-RunActors; the rest of the slots ran after.
+            engine.rng = Rng::new(prev.u32(RNG_SEED));
+            engine.vblank();
+            if let Err(Unported(what)) = engine.run_slots(cut..SLOTS, &inputs) {
+                *stats.unported.entry(what).or_default() += 1;
+                return Some(f);
+            }
             if let Some(m) = first_mismatch(&engine, cur, tag, player) {
-                panic!("{} frame {f} (piece from {start}), finishing a split frame: {m}", path.display());
+                panic!("{} frame {f} (piece from {start}), finishing a split frame at slot {cut:X}: {m}", path.display());
             }
             stats.frames += 1;
             continue;
@@ -355,7 +456,28 @@ fn check_piece(
         let other = if tag == P1 { P2 } else { P1 };
         for slot in 0..SLOTS {
             match &mut engine.slots[slot] {
-                None | Some(Actor::Opaque) => engine.slots[slot] = used(prev, slot).then_some(Actor::Opaque),
+                // Also reserve slots that unported code fills this frame (the opponent's
+                // actors, garbage icons): our own spawns this frame must go around them.
+                None | Some(Actor::Opaque) | Some(Actor::OpaqueQuick) | Some(Actor::Vanishing) => {
+                    let foreign_now = used(cur, slot) && cur.u8(slot_addr(slot)) != tag;
+                    // A foreign actor that isn't there at the end of the frame deleted itself
+                    // on its turn (the slot may already hold one of ours by then).
+                    let foreign_gone = used(prev, slot) && prev.u8(slot_addr(slot)) != tag && !foreign_now;
+                    let quick = |r: &Ram| r.u8(slot_addr(slot) + 1) & 0x80 == 0;
+                    engine.slots[slot] = if foreign_gone {
+                        Some(Actor::Vanishing)
+                    } else if used(prev, slot) {
+                        Some(if quick(prev) { Actor::OpaqueQuick } else { Actor::Opaque })
+                    } else if foreign_now {
+                        Some(if quick(cur) { Actor::OpaqueQuick } else { Actor::Opaque })
+                    } else {
+                        None
+                    };
+                }
+                // Unported code (the opponent's spawns) evicted one of our pop visuals.
+                Some(a) if a.evictable() && used(cur, slot) && cur.u8(slot_addr(slot)) != tag => {
+                    engine.slots[slot] = Some(Actor::Opaque);
+                }
                 Some(Actor::Player(p)) => {
                     // Garbage as of when this player runs: an opponent in an earlier slot
                     // may already have ended a chain this frame (acc drops to acc % 70).
@@ -384,11 +506,34 @@ fn check_piece(
             return Some(f);
         }
         let before = engine.clone();
+        engine.rng = Rng::new(prev.u32(RNG_SEED));
         if let Err(Unported(what)) = engine.frame(&inputs) {
             *stats.unported.entry(what).or_default() += 1;
             return Some(f);
         }
+        // The ROM's own code can overwrite a slot we model through a stale pointer held
+        // by an unported actor (seen with a full actor table). Can't be predicted: stop.
+        let overwritten = (0..SLOTS).any(|slot| {
+            let ours = matches!(&engine.slots[slot], Some(a) if a.code().is_some());
+            let a = slot_addr(slot);
+            ours && used(cur, slot) && cur.u8(a) == tag && load(cur, slot, tag).is_none() && !known_code(cur.code(a))
+        });
+        if overwritten {
+            *stats.unported.entry("slot overwritten by an unported actor").or_default() += 1;
+            return Some(f);
+        }
         for s in engine.slots.iter().flatten() {
+            let kind = match s {
+                Actor::Burst(_) => Some("burst frames"),
+                Actor::Piece(_) => Some("piece frames"),
+                Actor::GarbageClear(_) => Some("garbage clear frames"),
+                Actor::Glow(g) if g.state == GlowState::Fly => Some("glow flight frames"),
+                Actor::Glow(_) => Some("glow frames"),
+                _ => None,
+            };
+            if let Some(k) = kind {
+                *stats.visuals.entry(k).or_default() += 1;
+            }
             if let Actor::Player(p) = s {
                 if p.pop.is_some() {
                     stats.pop_frames += 1;
@@ -398,15 +543,99 @@ fn check_piece(
             fell |= matches!(s, Actor::Pivot(v) if v.state == PivotState::Falling)
                 || matches!(s, Actor::Satellite(t) if t.state == SatelliteState::Falling);
         }
-        match first_mismatch(&engine, cur, tag, player) {
-            None => {}
-            Some(m) => {
-                if split_frame(&before, &engine, cur, tag, player) {
-                    stats.split_frames += 1;
-                    finishing = true;
-                } else {
-                    panic!("{} frame {f} (piece from {start}): {m}", path.display());
+        // 1. The whole frame as modelled. 2. Unported actors drew random numbers before
+        // some of ours: try every placement. 3. The ROM's logic overran the video frame and
+        // the snapshot caught RunActors before slot `cut`: try every cut.
+        let rom_seed = cur.u32(RNG_SEED);
+        let rom_calls = {
+            let mut r = Rng::new(prev.u32(RNG_SEED));
+            (0..=600).find(|_| {
+                let hit = r.seed == rom_seed;
+                r.next();
+                hit
+            })
+        };
+        let exact = first_mismatch(&engine, cur, tag, player).is_none();
+        let mut verdict = None;
+        if exact && engine.rng.seed == rom_seed {
+            verdict = Some("exact");
+        } else if exact && rom_calls.is_some_and(|n| n > engine.rng_calls) {
+            verdict = Some("foreign"); // only unported actors' draws differ
+        } else if let Some(n) = rom_calls.filter(|&n| n > engine.rng_calls) {
+            let ours = engine.rng_calls;
+            let users = engine.rng_users.clone();
+            for split in splits(n - ours, users.len()) {
+                let mut trial = before.clone();
+                trial.rng = Rng::new(prev.u32(RNG_SEED));
+                trial.foreign_random = users.iter().copied().zip(split).collect();
+                if trial.frame(&inputs).is_ok() && trial.rng_calls == ours && first_mismatch(&trial, cur, tag, player).is_none() {
+                    engine = trial;
+                    verdict = Some("resolved");
+                    break;
                 }
+            }
+        }
+        if verdict.is_none() {
+            'cuts: for cut in 0..SLOTS {
+                let run_cut = |foreign: Vec<(usize, u32)>| {
+                    let mut trial = before.clone();
+                    trial.rng = Rng::new(prev.u32(RNG_SEED));
+                    trial.foreign_random = foreign;
+                    trial.vblank();
+                    trial.run_slots(0..cut, &inputs).ok().map(|_| trial)
+                };
+                let Some(trial) = run_cut(vec![]) else { continue };
+                let Some(n) = rom_calls.filter(|&n| n >= trial.rng_calls) else { continue };
+                if first_mismatch(&trial, cur, tag, player).is_none() {
+                    engine = trial;
+                    finishing = Some(cut);
+                    verdict = Some("split");
+                    break;
+                }
+                // Unported actors may also have drawn numbers in that first half.
+                let (ours, users) = (trial.rng_calls, trial.rng_users.clone());
+                for split in splits(n - ours, users.len()) {
+                    let Some(t) = run_cut(users.iter().copied().zip(split).collect()) else { continue };
+                    if t.rng_calls == ours && first_mismatch(&t, cur, tag, player).is_none() {
+                        engine = t;
+                        finishing = Some(cut);
+                        verdict = Some("split");
+                        break 'cuts;
+                    }
+                }
+            }
+        }
+        match verdict {
+            Some("exact") => {
+                stats.rng_frames += 1;
+                stats.rng_calls += engine.rng_calls as usize;
+            }
+            Some("foreign") => stats.rng_foreign += 1,
+            Some("resolved") => {
+                stats.rng_foreign += 1;
+                stats.rng_resolved += 1;
+            }
+            Some(_) => stats.split_frames += 1,
+            None => {
+                let m = first_mismatch(&engine, cur, tag, player)
+                    .unwrap_or_else(|| format!("we drew {} random numbers, the ROM {:?}", engine.rng_calls, rom_calls));
+                // Diagnostic: the cut that gets furthest, and what it trips on.
+                let best = (0..SLOTS)
+                    .map(|cut| {
+                        let mut trial = before.clone();
+                        trial.rng = Rng::new(prev.u32(RNG_SEED));
+                        trial.vblank();
+                        let _ = trial.run_slots(0..cut, &inputs);
+                        let first_bad = (0..SLOTS).find(|&sl| slot_matches(&trial, cur, tag, sl).is_err()).unwrap_or(SLOTS);
+                        (first_bad, cut, first_mismatch(&trial, cur, tag, player), trial.rng_calls)
+                    })
+                    .max_by_key(|t| t.0)
+                    .unwrap();
+                panic!(
+                    "{} frame {f} (piece from {start}): {m}
+  best cut {:X} (good up to slot {:X}, {} draws vs ROM {:?}): {:?}",
+                    path.display(), best.1, best.0, best.3, rom_calls, best.2
+                );
             }
         }
         stats.frames += 1;

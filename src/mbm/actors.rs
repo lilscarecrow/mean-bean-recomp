@@ -13,9 +13,13 @@
 use super::anim::{script, Anim};
 use super::bean_order::BeanColor;
 use super::field::{Field, Group, COLS, DIR, HIDDEN_ROWS, ROWS};
+use super::motion::{cos, sin, Motion};
 use super::pair::{PadInput, Pair, RotateKeys, Step};
+use super::rng::Rng;
 
 pub const SLOTS: usize = 64;
+/// Screen x of each field's left edge (`word_5B34`).
+pub const FIELD_X: [u16; 2] = [0x90, 0x150];
 /// Screen y of a field's top visible row (`word_5B34`), same for both players.
 pub const FIELD_TOP_Y: u16 = 0x90;
 /// Frames to wait after a piece settles, by the player's +$2B (`word_3B58`).
@@ -60,21 +64,40 @@ pub struct Unported(pub &'static str);
 pub enum Actor {
     /// A slot used by an actor this port doesn't model (keeps slot allocation right).
     Opaque,
+    /// Like `Opaque`, but allocated by `FindActorSlotQuick` (bit 7 of +$01 clear), so a
+    /// full table lets `FindActorSlot` take its slot.
+    OpaqueQuick,
+    /// An unmodelled actor that deletes itself when its turn comes this frame (its slot
+    /// is free for anything spawned later in the frame).
+    Vanishing,
     Player(Player),
     Pivot(Pivot),
     Satellite(Satellite),
     Effect(Effect),
+    Burst(Burst),
+    Piece(Piece),
+    GarbageClear(GarbageClear),
+    Glow(Glow),
 }
 
 impl Actor {
+    /// Allocated by `FindActorSlotQuick` (pop visuals): `FindActorSlot` may evict it.
+    pub fn evictable(&self) -> bool {
+        matches!(self, Actor::Burst(_) | Actor::Piece(_) | Actor::GarbageClear(_) | Actor::OpaqueQuick)
+    }
+
     /// The original resume address of this actor's current state (None for `Opaque`).
     pub fn code(&self) -> Option<u32> {
         match self {
-            Actor::Opaque => None,
+            Actor::Opaque | Actor::OpaqueQuick | Actor::Vanishing => None,
             Actor::Player(p) => Some(p.state.code()),
             Actor::Pivot(p) => Some(p.state.code()),
             Actor::Satellite(s) => Some(s.state.code()),
             Actor::Effect(e) => Some(e.state.code()),
+            Actor::Burst(b) => Some(b.state.code()),
+            Actor::Piece(p) => Some(p.state.code()),
+            Actor::GarbageClear(_) => Some(0x4DA4),
+            Actor::Glow(g) => Some(g.state.code()),
         }
     }
 }
@@ -89,7 +112,7 @@ pub enum PlayerState {
     FindPops,
     /// $3EA6: redraw links (`sub_5782`).
     Redraw,
-    /// $3EB6: pops → chain; otherwise start the settle delay.
+    /// $3EB6: pops â†’ chain; otherwise start the settle delay.
     Decide,
     /// $3EC6: settle delay (`ActorBookmark` with `aDelay`).
     SettleDelay,
@@ -374,6 +397,125 @@ impl Effect {
     }
 }
 
+// ---------------------------------------------------------------- pop visuals
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BurstState {
+    /// $4B72: staggered start (`aDelay` 0, 4, 8, 12 by pop order).
+    Wait,
+    /// $4B76: burst into pieces.
+    Burst,
+    /// $4B7E: pop animation, then gone.
+    Animate,
+}
+
+impl BurstState {
+    pub fn code(self) -> u32 {
+        match self {
+            BurstState::Wait => 0x4B72,
+            BurstState::Burst => 0x4B76,
+            BurstState::Animate => 0x4B7E,
+        }
+    }
+}
+
+/// A popping bean (`ActPuyoPop`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Burst {
+    pub player: u8,
+    pub color: u8,
+    pub x: u16,
+    pub y: u16,
+    pub delay: u16,
+    pub anim: Anim,
+    pub state: BurstState,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PieceState {
+    /// $4D74: just thrown.
+    Start,
+    /// $4D7C: wait 4 frames.
+    Wait,
+    /// $4D80: fly under gravity until the animation ends or it leaves the screen.
+    Fly,
+}
+
+impl PieceState {
+    pub fn code(self) -> u32 {
+        match self {
+            PieceState::Start => 0x4D74,
+            PieceState::Wait => 0x4D7C,
+            PieceState::Fly => 0x4D80,
+        }
+    }
+}
+
+/// A piece flying off a popped bean (`ActPuyoPoppedPiece`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Piece {
+    pub player: u8,
+    pub color: u8,
+    pub motion: Motion,
+    pub draw: u8,
+    pub delay: u16,
+    pub anim: Anim,
+    pub state: PieceState,
+}
+
+/// Garbage cleared by a pop (`ActGarbageRemove`, $4DA4): plays its animation, then gone.
+#[derive(Clone, Debug, PartialEq)]
+pub struct GarbageClear {
+    pub player: u8,
+    pub x: u16,
+    pub y: u16,
+    pub anim: Anim,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GlowState {
+    /// $23628: just spawned (first chain step: straight to `End`).
+    Start,
+    /// $23642, $2364C: hover for 8 frames.
+    Hover,
+    HoverWait,
+    /// $23658: aim at the other side.
+    Launch,
+    /// $2369A: fly there in 33 frames, wobbling.
+    Fly,
+    /// $23736: final animation, then gone.
+    End,
+}
+
+impl GlowState {
+    pub fn code(self) -> u32 {
+        match self {
+            GlowState::Start => 0x23628,
+            GlowState::Hover => 0x23642,
+            GlowState::HoverWait => 0x2364C,
+            GlowState::Launch => 0x23658,
+            GlowState::Fly => 0x2369A,
+            GlowState::End => 0x23736,
+        }
+    }
+}
+
+/// The chain glow (`ActGarbageGlow`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Glow {
+    pub player: u8,
+    /// Chain step it was spawned on (+$2B; 0 = first step).
+    pub chain: u8,
+    pub motion: Motion,
+    pub draw: u8,
+    /// Un-wobbled x (+$1E word) and flight counter (+$26 word).
+    pub base_x: u16,
+    pub counter: u16,
+    pub delay: u16,
+    pub anim: Anim,
+    pub state: GlowState,
+}
+
 // ---------------------------------------------------------------- engine
 
 /// What the engine needs from outside each frame.
@@ -393,6 +535,28 @@ impl Default for RotateKeys {
     fn default() -> Self {
         RotateKeys([2, 1, 2])
     }
+}
+
+/// `ActPuyoPoppedPiece`.
+fn run_piece(mut p: Piece) -> Option<Piece> {
+    match p.state {
+        PieceState::Start => {
+            p.delay = 4;
+            p.state = PieceState::Wait;
+        }
+        PieceState::Wait => {
+            if wait(&mut p.delay) {
+                p.state = PieceState::Fly;
+            }
+        }
+        PieceState::Fly => {
+            p.draw = 0x87;
+            if p.anim.step() || p.motion.step(p.draw) {
+                return None;
+            }
+        }
+    }
+    Some(p)
 }
 
 /// `sub_9C64`: points go to the score (capped) and the garbage accumulator (capped
@@ -451,6 +615,20 @@ pub struct Engine {
     /// Plane commands $89 (post-pop fall animation) queued this frame, by player slot;
     /// the vertical-blank handler runs them before the next frame's actors.
     pub fall_commands: Vec<usize>,
+    /// The game's random number generator (`rng_seed`).
+    pub rng: Rng,
+    /// `Random` calls made during the last frame (vertical blank included).
+    pub rng_calls: u32,
+    /// `garbage_glow_x`/`_y`: where the last popped bean was; the glow starts there.
+    pub glow_xy: (u16, u16),
+    /// Spawns of actors this port doesn't have yet (garbage icons after a glow).
+    pub unported_spawns: u32,
+    /// `Random` calls made by unported actors, as (before slot, count): drawn just
+    /// before that slot runs (used when checking against recordings).
+    pub foreign_random: Vec<(usize, u32)>,
+    /// Slots whose actors drew random numbers last frame, in order.
+    pub rng_users: Vec<usize>,
+    current_slot: usize,
 }
 
 impl Engine {
@@ -462,7 +640,22 @@ impl Engine {
             level_mode: 0,
             difficulty: 0,
             fall_commands: vec![],
+            rng: Rng::new(0),
+            rng_calls: 0,
+            glow_xy: (0, 0),
+            unported_spawns: 0,
+            foreign_random: vec![],
+            rng_users: vec![],
+            current_slot: usize::MAX,
         }
+    }
+
+    fn random(&mut self) -> u16 {
+        self.rng_calls += 1;
+        if self.current_slot != usize::MAX && self.rng_users.last() != Some(&self.current_slot) {
+            self.rng_users.push(self.current_slot);
+        }
+        self.rng.next()
     }
 
     /// `SpecPlane89`: one step of every bean falling after a pop. The flag stays set
@@ -491,6 +684,12 @@ impl Engine {
         self.slots.iter().position(|s| s.is_none())
     }
 
+    /// `FindActorSlot`: a free slot, or, with the table full, the first one held by a
+    /// `FindActorSlotQuick` actor (which is wiped and replaced).
+    fn find_actor_slot(&self) -> Option<usize> {
+        self.free_slot().or_else(|| self.slots.iter().position(|s| s.as_ref().is_some_and(Actor::evictable)))
+    }
+
     fn player_mut(&mut self, slot: usize) -> &mut Player {
         match self.slots[slot].as_mut() {
             Some(Actor::Player(p)) => p,
@@ -507,11 +706,33 @@ impl Engine {
 
     /// One frame: every actor in slot order (`RunActors`).
     pub fn frame(&mut self, inputs: &Inputs) -> Result<(), Unported> {
-        // Last frame's vertical blank: queued plane commands.
+        self.vblank();
+        self.run_slots(0..SLOTS, inputs)
+    }
+
+    /// The vertical blank before a frame's logic: queued plane commands, then one
+    /// `Random`. (When the logic overruns a video frame, the ROM's vertical blank lands
+    /// in the middle of `RunActors`; see `run_slots`.)
+    pub fn vblank(&mut self) {
+        self.rng_calls = 0;
+        self.rng_users.clear();
+        self.current_slot = usize::MAX;
         for slot in std::mem::take(&mut self.fall_commands) {
             self.run_fall_command(slot);
         }
-        for slot in 0..SLOTS {
+        self.random();
+    }
+
+    /// `RunActors` over some of the slots (all of them in a normal frame).
+    pub fn run_slots(&mut self, slots: std::ops::Range<usize>, inputs: &Inputs) -> Result<(), Unported> {
+        let foreign = std::mem::take(&mut self.foreign_random);
+        for slot in slots {
+            for &(_, n) in foreign.iter().filter(|(s, _)| *s == slot) {
+                (0..n).for_each(|_| {
+                    self.rng.next();
+                });
+            }
+            self.current_slot = slot;
             // Leave a placeholder so the running actor's slot still counts as used.
             let Some(actor) = self.slots[slot].replace(Actor::Opaque) else {
                 self.slots[slot] = None;
@@ -519,13 +740,20 @@ impl Engine {
             };
             let next = match actor {
                 Actor::Opaque => Some(Actor::Opaque),
+                Actor::OpaqueQuick => Some(Actor::OpaqueQuick),
+                Actor::Vanishing => None,
                 Actor::Player(p) => self.run_player(slot, p, inputs)?.map(Actor::Player),
                 Actor::Pivot(p) => self.run_pivot(slot, p, inputs)?,
                 Actor::Satellite(s) => self.run_satellite(slot, s)?,
                 Actor::Effect(e) => self.run_effect(e).map(Actor::Effect),
+                Actor::Burst(b) => self.run_burst(b).map(Actor::Burst),
+                Actor::Piece(p) => run_piece(p).map(Actor::Piece),
+                Actor::GarbageClear(mut g) => (!g.anim.step()).then_some(Actor::GarbageClear(g)),
+                Actor::Glow(g) => self.run_glow(g).map(Actor::Glow),
             };
             self.slots[slot] = next;
         }
+        self.current_slot = usize::MAX;
         Ok(())
     }
 
@@ -593,6 +821,10 @@ impl Engine {
             PopSpawn => {
                 let points = if p.bonus == 0 { u32::from(p.base) } else { u32::from(p.base) * u32::from(p.bonus) };
                 add_points(&mut p, points);
+                self.spawn_pops(&p);
+                if self.level_mode & 2 == 0 {
+                    self.spawn_glow(&p);
+                }
                 p.delay = 0x18;
                 p.state = PopWait;
             }
@@ -652,6 +884,160 @@ impl Engine {
         Ok(Some(p))
     }
 
+    /// `CheckPuyoPop`: a burst for every popping bean and a clear effect for every
+    /// cleared garbage bean, in reading order; bursts start 0, 4, 8, 12 frames apart.
+    fn spawn_pops(&mut self, p: &Player) {
+        let id = p.id as usize;
+        let work = p.pop.as_ref().unwrap();
+        let mut stagger = 0u16;
+        for row in HIDDEN_ROWS..ROWS {
+            for col in 0..COLS {
+                if !work.cells.contains(&(col, row)) {
+                    continue;
+                }
+                let x = FIELD_X[id] + 8 + col as u16 * 16;
+                let y = FIELD_TOP_Y + 8 + (row - HIDDEN_ROWS) as u16 * 16;
+                let Some(slot) = self.free_slot() else { continue };
+                let color = work.backup.get(col as i16, row as i16).map_or(0, |c| c as u8);
+                if color == BeanColor::Garbage as u8 {
+                    self.slots[slot] = Some(Actor::GarbageClear(GarbageClear { player: p.id, x, y, anim: Anim::new(script::GARBAGE_CLEAR) }));
+                } else {
+                    self.glow_xy = (x, y);
+                    self.slots[slot] = Some(Actor::Burst(Burst {
+                        player: p.id,
+                        color,
+                        x,
+                        y,
+                        delay: stagger,
+                        anim: Anim { ptr: script::POP, time: 0, frame: 8 },
+                        state: BurstState::Wait,
+                    }));
+                    stagger = (stagger + 4) & 0xF;
+                }
+            }
+        }
+    }
+
+    /// `SpawnGarbageGlow`.
+    fn spawn_glow(&mut self, p: &Player) {
+        let Some(slot) = self.find_actor_slot() else { return };
+        let (x, y) = self.glow_xy;
+        self.slots[slot] = Some(Actor::Glow(Glow {
+            player: p.id,
+            chain: p.chain,
+            motion: Motion { x: u32::from(x) << 16, y: u32::from(y) << 16, ..Motion::default() },
+            draw: 0,
+            base_x: 0,
+            counter: 0,
+            delay: 0,
+            anim: Anim::new(script::GLOW[p.id as usize & 1]),
+            state: GlowState::Start,
+        }));
+    }
+
+    fn run_burst(&mut self, mut b: Burst) -> Option<Burst> {
+        match b.state {
+            BurstState::Wait => {
+                if wait(&mut b.delay) {
+                    b.state = BurstState::Burst;
+                }
+            }
+            BurstState::Burst => {
+                // ActPuyoPop_PopNormal: four pieces, roughly up-left, up-right, ...
+                for i in (0..4u8).rev() {
+                    let Some(slot) = self.free_slot() else { continue };
+                    let angle = (i << 4).wrapping_add(0x64).wrapping_add((self.random() & 7) as u8);
+                    self.slots[slot] = Some(Actor::Piece(Piece {
+                        player: b.player,
+                        color: b.color,
+                        motion: Motion {
+                            x: u32::from(b.x) << 16,
+                            y: u32::from(b.y) << 16,
+                            vx: sin(angle, 0x400),
+                            vy: cos(angle, 0x400),
+                            ay: 0x4000,
+                            ty: 0xFFFF,
+                            ..Motion::default()
+                        },
+                        draw: 0,
+                        delay: 0,
+                        anim: Anim { ptr: script::POPPED_PIECE, time: 0, frame: 6 },
+                        state: PieceState::Start,
+                    }));
+                }
+                b.state = BurstState::Animate;
+            }
+            BurstState::Animate => {
+                if b.anim.step() {
+                    return None;
+                }
+            }
+        }
+        Some(b)
+    }
+
+    fn run_glow(&mut self, mut g: Glow) -> Option<Glow> {
+        match g.state {
+            GlowState::Start => {
+                if g.chain == 0 {
+                    self.glow_finish(&mut g);
+                } else {
+                    g.anim.step();
+                    g.draw = 0x83;
+                    g.state = GlowState::Hover;
+                }
+            }
+            GlowState::Hover => {
+                g.delay = 8;
+                g.state = GlowState::HoverWait;
+            }
+            GlowState::HoverWait => {
+                g.anim.step();
+                if wait(&mut g.delay) {
+                    g.state = GlowState::Launch;
+                }
+            }
+            GlowState::Launch => {
+                // Aim at the other player's side in 32 frames.
+                g.counter = 0x1F;
+                let target_x: u32 = if g.player == 0 { 0x180 << 16 } else { 0xC0 << 16 };
+                g.motion.vx = ((target_x.wrapping_sub(g.motion.x) as i32) >> 5) as u32;
+                g.motion.vy = ((0x88_0000u32.wrapping_sub(g.motion.y) as i32) >> 5) as u32;
+                g.base_x = (g.motion.x >> 16) as u16;
+                g.state = GlowState::Fly;
+            }
+            GlowState::Fly => {
+                g.anim.step();
+                g.motion.x = (u32::from(g.base_x) << 16) | (g.motion.x & 0xFFFF);
+                g.motion.step(g.draw);
+                g.base_x = (g.motion.x >> 16) as u16;
+                let side: u8 = if g.player == 0 { 0x80 } else { 0 };
+                let angle = side | ((g.counter as u8) << 2);
+                let wobble = (sin(angle, 0x6000) >> 16) as u16;
+                g.motion.x = (u32::from(((g.motion.x >> 16) as u16).wrapping_add(wobble)) << 16) | (g.motion.x & 0xFFFF);
+                let done = g.counter == 0;
+                g.counter = g.counter.wrapping_sub(1);
+                if done {
+                    g.anim.ptr = script::GLOW_END[g.player as usize & 1];
+                    self.glow_finish(&mut g);
+                }
+            }
+            GlowState::End => {
+                if g.anim.step() {
+                    return None;
+                }
+            }
+        }
+        Some(g)
+    }
+
+    /// `loc_2371C`: refresh the opponent's incoming-garbage icons (not ported: they
+    /// are separate actors), then play out the animation.
+    fn glow_finish(&mut self, g: &mut Glow) {
+        self.unported_spawns += 1;
+        g.state = GlowState::End;
+    }
+
     /// `sub_9A56`: base points and bonus for this chain step, and the bean counters.
     fn score_step(&self, p: &mut Player) {
         let groups = &p.pop.as_ref().unwrap().groups;
@@ -673,7 +1059,7 @@ impl Engine {
         p.bonus = bonus.min(999);
     }
 
-    /// `sub_9CA2`: enough beans popped → next speed step.
+    /// `sub_9CA2`: enough beans popped â†’ next speed step.
     fn speed_up(&mut self, p: &mut Player) -> Result<(), Unported> {
         if p.beans_count < p.threshold {
             return Ok(());
@@ -716,9 +1102,9 @@ impl Engine {
         let (pivot_slot, sat_slot) = match inputs.spawn_slots[id] {
             Some(slots) => slots,
             None => {
-                let a = self.free_slot().ok_or(Unported("no free actor slot"))?;
+                let a = self.find_actor_slot().ok_or(Unported("no free actor slot"))?;
                 self.slots[a] = Some(Actor::Opaque);
-                let b = self.free_slot().ok_or(Unported("no free actor slot"))?;
+                let b = self.find_actor_slot().ok_or(Unported("no free actor slot"))?;
                 (a, b)
             }
         };
