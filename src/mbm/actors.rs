@@ -8,8 +8,10 @@
 //! Ported so far: the player's field-controller loop between pieces (wait for the pair,
 //! find pops, redraw, delay, spawn the next pair), the pair's pivot and satellite
 //! (controlled, landing, physics fall, squash, write to the field) and the little
-//! post-landing effect. Pops, garbage and game over stop the engine with `Unported`.
+//! post-landing effect, pops and chains, garbage, and the CPU opponent (`ai`). Game
+//! over and the CPU's pattern play stop the engine with `Unported`.
 
+use super::ai::{self, AiField};
 use super::anim::{script, Anim};
 use super::bean_order::BeanColor;
 use super::field::{Field, Group, COLS, DIR, HIDDEN_ROWS, ROWS};
@@ -209,6 +211,11 @@ pub struct Player {
     pub threshold: u16,
     /// Garbage this player's chains sent while no opponent actor is modelled.
     pub garbage_sent: u16,
+    /// The CPU's plan (`sub_127BA`): target column (+$20) and rotation (+$21), frames
+    /// to move (+$2C) and to pause (+$2D). Its timer and phase are `w26`'s two bytes.
+    pub target: (u8, u8),
+    pub move_frames: u8,
+    pub pause_frames: u8,
     /// Work for the chain step in progress.
     pub pop: Option<PopWork>,
 }
@@ -669,6 +676,25 @@ fn close_gaps(field: &mut Field, backup: &Field) -> Vec<FallingBean> {
     falling
 }
 
+/// The CPU's plan as the player actor holds it (timer and phase in `w26`).
+fn player_plan(p: &Player) -> ai::Plan {
+    ai::Plan {
+        col: p.target.0,
+        rot: p.target.1,
+        timer: (p.w26 >> 8) as u8,
+        phase: p.w26 as u8,
+        move_frames: p.move_frames,
+        pause_frames: p.pause_frames,
+    }
+}
+
+fn set_player_plan(p: &mut Player, plan: ai::Plan) {
+    p.target = (plan.col, plan.rot);
+    p.w26 = u16::from(plan.timer) << 8 | u16::from(plan.phase);
+    p.move_frames = plan.move_frames;
+    p.pause_frames = plan.pause_frames;
+}
+
 /// `ActorBookmark` with a delay: true when the wait is over.
 fn wait(delay: &mut u16) -> bool {
     if *delay == 0 {
@@ -714,6 +740,22 @@ pub struct Engine {
     /// Slots whose actors drew random numbers last frame, in order.
     pub rng_users: Vec<usize>,
     current_slot: usize,
+    /// The CPU's byte image of each field: cells with links, group marks, its tables.
+    pub ai_fields: [AiField; 2],
+    /// Per-CPU memory between pieces (`byte_FF1D4E` / `byte_FF1D58`).
+    pub cpu_memory: [ai::CpuMemory; 2],
+    /// Pad reads since the last plan (`byte_FF1D0A` / `_0B`).
+    pub cpu_reads: [u8; 2],
+    /// `byte_FF1D0C` / `byte_FF1D0D`: for the CPU's controller sprites (not ported).
+    pub cpu_pressed: u8,
+    pub cpu_lean: u8,
+    /// `word_FF198C` (scenario mode): 2 if the CPU has 36+ beans, 1 if the player has.
+    pub crowding: u16,
+    /// `opponent`, `level`, `time_minutes`, `control_player_1`.
+    pub opponent: u8,
+    pub level: u8,
+    pub time_minutes: u16,
+    pub control_player_1: u8,
 }
 
 impl Engine {
@@ -736,7 +778,38 @@ impl Engine {
             foreign_random: vec![],
             rng_users: vec![],
             current_slot: usize::MAX,
+            ai_fields: [AiField::default(), AiField::default()],
+            cpu_memory: [[0; 10]; 2],
+            cpu_reads: [0; 2],
+            cpu_pressed: 0,
+            cpu_lean: 0,
+            crowding: 0,
+            opponent: 0,
+            level: 0,
+            time_minutes: 0,
+            control_player_1: 0xFF,
         }
+    }
+
+    /// `sub_12646`: the CPU plays this player.
+    pub fn is_cpu(&self, id: u8) -> bool {
+        ai::is_cpu(self.level_mode, id, self.control_player_1)
+    }
+
+    /// Count the draws code outside `random()` made from `before` on (at most a few).
+    fn note_draws(&mut self, before: Rng) {
+        let mut r = before;
+        for _ in 0..64 {
+            if r == self.rng {
+                return;
+            }
+            r.next();
+            self.rng_calls += 1;
+            if self.current_slot != usize::MAX && self.rng_users.last() != Some(&self.current_slot) {
+                self.rng_users.push(self.current_slot);
+            }
+        }
+        panic!("lost track of random draws");
     }
 
     fn random(&mut self) -> u16 {
@@ -863,6 +936,8 @@ impl Engine {
                 }
             }
             FindPops => {
+                // sub_5960 also leaves links and group marks, which the CPU reads later.
+                self.ai_fields[p.id as usize].render(&self.fields[p.id as usize], true);
                 p.w26 = self.fields[p.id as usize].find_pops().len() as u16;
                 p.state = Redraw;
             }
@@ -968,18 +1043,62 @@ impl Engine {
             }
             WaitGarbage => {
                 if p.flags & flag::GARBAGE_FALLING == 0 {
+                    // loc_3DDE: sub_12BAA
+                    let id = p.id as usize;
+                    self.ai_fields[id].render(&self.fields[id], false);
+                    ai::analyze(&mut self.ai_fields[id]);
+                    if self.level_mode & 3 == 0 && id == 1 {
+                        self.crowding = ai::crowding(&self.ai_fields[1], &self.ai_fields[0]);
+                    }
                     p.state = PreSpawn1;
                 }
             }
-            PreSpawn1 => p.state = PreSpawn2,
-            PreSpawn2 => p.state = PreSpawn3,
-            PreSpawn3 => p.state = Spawn,
+            PreSpawn1 => {
+                if self.is_cpu(p.id) {
+                    ai::placement_table(&mut self.ai_fields[p.id as usize], false);
+                }
+                p.state = PreSpawn2;
+            }
+            PreSpawn2 => {
+                if self.is_cpu(p.id) {
+                    ai::placement_table(&mut self.ai_fields[p.id as usize], true);
+                }
+                p.state = PreSpawn3;
+            }
+            PreSpawn3 => {
+                self.cpu_reads[p.id as usize & 1] = 0;
+                if self.is_cpu(p.id) {
+                    self.plan(&mut p, inputs)?;
+                }
+                p.state = Spawn;
+            }
             Spawn => {
                 self.spawn_pair(slot, &mut p, inputs)?;
                 p.state = WaitPair;
             }
         }
         Ok(Some(p))
+    }
+
+    /// `sub_127BA`: where the CPU puts the pair about to spawn.
+    fn plan(&mut self, p: &mut Player, inputs: &Inputs) -> Result<(), Unported> {
+        let id = p.id as usize;
+        let (pivot, sat) = inputs.next_pair[id].ok_or(Unported("no next pair given"))?;
+        let ctx = ai::PlanContext {
+            player_id: p.id,
+            opponent: self.opponent,
+            difficulty: self.difficulty,
+            time_minutes: self.time_minutes,
+            pair: (pivot as u8, sat as u8),
+        };
+        let mut plan = player_plan(p);
+        let mut scratch = ai::PlanScratch::default();
+        let before = self.rng;
+        let res = ai::plan(&self.ai_fields[id], &ctx, &mut self.cpu_memory[id], &mut plan, &mut scratch, &mut self.rng);
+        self.note_draws(before);
+        res.map_err(Unported)?;
+        set_player_plan(p, plan);
+        Ok(())
     }
 
     /// `CheckPuyoPop`: a burst for every popping bean and a clear effect for every
@@ -1435,10 +1554,11 @@ impl Engine {
     }
 
     fn run_pivot(&mut self, _slot: usize, mut v: Pivot, inputs: &Inputs) -> Result<Option<Actor>, Unported> {
-        let (id, player_flags, fall_speed) = {
+        let (id, player_flags, fall_speed, mut plan) = {
             let p = self.player_mut(v.player_slot);
-            (p.id as usize, p.flags, p.fall_speed)
+            (p.id as usize, p.flags, p.fall_speed, player_plan(p))
         };
+        let cpu = self.is_cpu(id as u8);
         match v.state {
             PivotState::Init => {
                 v.place();
@@ -1448,7 +1568,25 @@ impl Engine {
                 if player_flags & flag::PIVOT_ACTIVE == 0 {
                     return Err(Unported("pair hidden while in play (loc_4F3A)"));
                 }
-                let step = v.pair.step_pivot(&self.fields[id], inputs.pads[id], inputs.keys[id], fall_speed, inputs.frame_count);
+                let step = if cpu {
+                    let before = self.rng;
+                    let pad = ai::CpuPad {
+                        human: inputs.pads[id],
+                        plan: &mut plan,
+                        player_id: id as u8,
+                        level: self.level,
+                        reads: &mut self.cpu_reads[id & 1],
+                        pressed: &mut self.cpu_pressed,
+                        lean: &mut self.cpu_lean,
+                        rng: &mut self.rng,
+                    };
+                    let step = v.pair.step_pivot(&self.fields[id], pad, ai::CPU_KEYS, fall_speed, inputs.frame_count);
+                    self.note_draws(before);
+                    set_player_plan(self.player_mut(v.player_slot), plan);
+                    step
+                } else {
+                    v.pair.step_pivot(&self.fields[id], inputs.pads[id], inputs.keys[id], fall_speed, inputs.frame_count)
+                };
                 if let Step::Falling { soft_drop_point: true } = step {
                     self.player_mut(v.player_slot).flags |= flag::SOFT_DROP_POINT;
                 }

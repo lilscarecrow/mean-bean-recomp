@@ -2,14 +2,16 @@
 //! ROM's next frame (column, row, rotation, fall progress, slide, contacts, lock timer,
 //! lock flag, satellite animation), or land on the same frame the ROM does.
 //!
-//! Only P1: its inputs are in RAM. The CPU's inputs never touch RAM.
+//! P1 with its pad from RAM; P2 with the CPU's pad (`ai::CpuPad`), which never touches
+//! RAM, worked out at each point the pivot reads it.
 
 mod support;
 
+use bean_machine::mbm::ai;
 use bean_machine::mbm::anim::Anim;
 use bean_machine::mbm::field::Field;
 use bean_machine::mbm::pair::{Pair, PadInput, RotateKeys, Step};
-use support::{frames, recordings, Ram, FRAME_COUNT, P1, P1_CTRL, P1_KEYS, PIVOT_FALLING, PIVOT_LANDING};
+use support::{frames, recordings, Ram, FRAME_COUNT, P1, P2, P1_CTRL, P1_KEYS, PIVOT_FALLING, PIVOT_LANDING};
 
 static LAG_FRAMES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 static COVERAGE: std::sync::Mutex<std::collections::BTreeMap<&'static str, usize>> =
@@ -133,4 +135,138 @@ fn controlled_pair_matches_the_original_every_frame() {
         }
     }
     panic!("{}", report.join("\n"));
+}
+
+const LEVEL: u32 = 0xFF_0112;
+const CONTROL_P1: u32 = 0xFF_1958;
+const CPU_READS: u32 = 0xFF_1D0A;
+
+fn cpu_plan(ram: &Ram, player: u32) -> ai::Plan {
+    ai::Plan {
+        col: ram.u8(player + 0x20),
+        rot: ram.u8(player + 0x21),
+        timer: ram.u8(player + 0x26),
+        phase: ram.u8(player + 0x27),
+        move_frames: ram.u8(player + 0x2C),
+        pause_frames: ram.u8(player + 0x2D),
+    }
+}
+
+/// P2 played by the CPU: the pair stepped with `sub_12E6C` as its pad (read at every
+/// point the pivot reads it), the CPU's move/pause timer and its read counter. Random
+/// draws by the pad (low levels) come after an unknown number of other draws, so the
+/// RNG offset is searched; the frame's final seed must still be reachable.
+#[test]
+fn cpu_pair_matches_the_original_every_frame() {
+    let (mut checked, mut draws, mut lag) = (0usize, 0usize, 0usize);
+    let mut cover = std::collections::BTreeMap::<&str, usize>::new();
+    for path in recordings() {
+        let poked = support::poked_frames(&path);
+        let mut prev: Option<Ram> = None;
+        for (frame, ram) in frames(&path).enumerate() {
+            let Some(p) = prev.replace(ram) else { continue };
+            let cur = prev.as_ref().unwrap();
+            if poked.contains(&frame) || poked.contains(&(frame - 1)) {
+                continue;
+            }
+            let Some((pivot, sat)) = p.pair(P2, false) else { continue };
+            if p.bytes(0xFF_E000, 0x1000) == cur.bytes(0xFF_E000, 0x1000) {
+                lag += 1;
+                continue;
+            }
+            let Some(player) = p.player_actor(P2) else { continue };
+            let id = p.u8(player + 0x2A);
+            if !ai::is_cpu(p.u8(support::addr::LEVEL_MODE), id, p.u8(CONTROL_P1)) {
+                continue;
+            }
+            let code_now = cur.code(pivot);
+            if code_now != PIVOT_FALLING && !PIVOT_LANDING.contains(&code_now) {
+                continue;
+            }
+            let field = Field::from_words(&p.field_words(1));
+            let speed = if player < pivot { cur.u16(player + 0x1A) } else { p.u16(player + 0x1A) };
+            let human = PadInput { hold: cur.u8(P1_CTRL + 6), press: cur.u8(P1_CTRL + 7), repeat: cur.u8(P1_CTRL + 8) };
+            let seed = p.u32(support::addr::RNG_SEED);
+            let end = cur.u32(support::addr::RNG_SEED);
+            let want = (pair_from(cur, pivot, sat), cpu_plan(cur, player), cur.u8(CPU_READS + u32::from(id)));
+            let landed = PIVOT_LANDING.contains(&code_now);
+            let attempt = |skip: usize| {
+                let mut rng = bean_machine::mbm::rng::Rng::new(seed);
+                for _ in 0..skip {
+                    rng.next();
+                }
+                let mut plan = cpu_plan(&p, player);
+                if player < pivot {
+                    plan.timer = plan.timer.wrapping_add(1); // the player actor runs first
+                }
+                let mut reads = p.u8(CPU_READS + u32::from(id));
+                let (mut pressed, mut lean) = (0, 0);
+                let mut pair = pair_from(&p, pivot, sat);
+                let before_rng = rng.seed;
+                let step = {
+                    let pad = ai::CpuPad {
+                        human,
+                        plan: &mut plan,
+                        player_id: id,
+                        level: p.u8(LEVEL),
+                        reads: &mut reads,
+                        pressed: &mut pressed,
+                        lean: &mut lean,
+                        rng: &mut rng,
+                    };
+                    pair.step(&field, pad, ai::CPU_KEYS, speed, cur.u16(FRAME_COUNT), sat < pivot)
+                };
+                if player > pivot {
+                    plan.timer = plan.timer.wrapping_add(1);
+                }
+                let drew = rng.seed != before_rng;
+                let reaches_end = (0..64).any(|_| {
+                    let hit = rng.seed == end;
+                    rng.next();
+                    hit
+                });
+                (step, pair, plan, reads, drew, reaches_end)
+            };
+            let mut found = None;
+            for skip in 0..64 {
+                let (step, pair, plan, reads, drew, reaches_end) = attempt(skip);
+                let ok = if landed {
+                    step == Step::Landed && (plan, reads) == (want.1, want.2)
+                } else {
+                    step != Step::Landed && (pair, plan, reads) == want
+                };
+                if ok && reaches_end {
+                    found = Some(drew);
+                    break;
+                }
+                if !drew && skip == 0 && !ok {
+                    break; // the pad drew nothing: the RNG offset can't matter
+                }
+            }
+            let Some(drew) = found else {
+                let (step, pair, plan, reads, _, _) = attempt(0);
+                panic!(
+                    "{} frame {frame} (level {}, speed {speed:04X}): CPU pair differs\n want {:?} landed={landed}\n      {:?} reads {}\n  got {:?} {step:?}\n      {:?} reads {}",
+                    path.display(),
+                    p.u8(LEVEL),
+                    want.0,
+                    want.1,
+                    want.2,
+                    pair,
+                    plan,
+                    reads
+                );
+            };
+            checked += 1;
+            draws += usize::from(drew);
+            let before = cpu_plan(&p, player);
+            let after = cpu_plan(cur, player);
+            let mut hit = |k: &'static str, on: bool| *cover.entry(k).or_insert(0) += usize::from(on);
+            hit("phase flips", before.phase != after.phase);
+            hit("moves", cur.u16(pivot + 0x1A) != p.u16(pivot + 0x1A));
+            hit("turns", cur.u8(pivot + 0x2B) != p.u8(pivot + 0x2B));
+            hit("landed", landed);
+        }
+    }
+    eprintln!("{checked} CPU frames identical ({draws} with pad random draws, {lag} lag frames skipped); {cover:?}");
 }

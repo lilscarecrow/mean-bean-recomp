@@ -6,6 +6,7 @@
 mod support;
 
 use bean_machine::mbm::actors::*;
+use bean_machine::mbm::ai::{off, AiField};
 use bean_machine::mbm::anim::Anim;
 use bean_machine::mbm::field::Field;
 use bean_machine::mbm::motion::Motion;
@@ -130,6 +131,9 @@ fn load(ram: &Ram, slot: usize, tag: u8) -> Option<Actor> {
             chain: ram.u8(a + 9),
             fall_speed: ram.u16(a + 0x1A),
             speed_level: ram.u8(a + 0x2B),
+            target: (ram.u8(a + 0x20), ram.u8(a + 0x21)),
+            move_frames: ram.u8(a + 0x2C),
+            pause_frames: ram.u8(a + 0x2D),
             pending_garbage: ram.u16(a + 0x14),
             speed_index: ram.u8(a + 0x08),
             score: ram.u32(a + 0x0A),
@@ -247,7 +251,7 @@ fn describe(actor: &Actor) -> String {
     match actor {
         Actor::Opaque | Actor::OpaqueQuick | Actor::Vanishing => "opaque".into(),
         Actor::Player(p) => format!(
-            "player {:04X} flags {:02X} delay {} chain {} score {} acc {} base {} bonus {} beans {}/{} speed {:04X} step {} next {} w26 {:04X}",
+            "player {:04X} flags {:02X} delay {} chain {} score {} acc {} base {} bonus {} beans {}/{} speed {:04X} step {} next {} w26 {:04X} cpu {:?} {} {}",
             p.state.code(),
             p.flags & 0x17,
             p.delay,
@@ -262,6 +266,9 @@ fn describe(actor: &Actor) -> String {
             p.speed_index,
             p.threshold,
             p.w26,
+            p.target,
+            p.move_frames,
+            p.pause_frames,
         ),
         Actor::Pivot(v) => match v.state {
             PivotState::Init | PivotState::Controlled => format!("pivot {:04X}", v.state.code()),
@@ -380,14 +387,8 @@ fn slot_matches(engine: &Engine, cur: &Ram, tag: u8, slot: usize) -> Result<(), 
         }
         Some(Actor::Opaque) | Some(Actor::OpaqueQuick) | Some(Actor::Vanishing) => Ok(()),
         Some(ours) => {
-            let mut want = describe_ram(cur, slot, tag, ours);
-            let mut got = describe(ours);
-            if tag == P2 && matches!(ours, Actor::Player(_)) {
-                // The CPU's (unported) planning uses the player actor's +$26 as scratch.
-                let mask = |s: &str| s.split(" w26 ").next().unwrap().to_string();
-                want = want.map(|w| mask(&w));
-                got = mask(&got);
-            }
+            let want = describe_ram(cur, slot, tag, ours);
+            let got = describe(ours);
             if want.as_deref() == Some(got.as_str()) {
                 Ok(())
             } else {
@@ -403,11 +404,35 @@ fn field_matches(engine: &Engine, cur: &Ram, player: usize) -> bool {
     engine.fields[player] == Field::from_words(&cur.field_words(player))
 }
 
+const AI_FIELD: [u32; 2] = [0xFF_1D62, 0xFF_20CC];
+const CPU_MEMORY: [u32; 2] = [0xFF_1D4E, 0xFF_1D58];
+const CPU_READS: u32 = 0xFF_1D0A;
+
+/// The CPU's analysis tables (`pUnk2`..`pUnk5`), memory and pad-read counter.
+fn ai_mismatch(engine: &Engine, cur: &Ram, player: usize) -> Option<String> {
+    let lo = off::UNK2;
+    let rom = cur.bytes(AI_FIELD[player] + lo as u32, off::SIZE - lo);
+    let ours = &engine.ai_fields[player].bytes[lo..];
+    if rom != ours {
+        let at = rom.iter().zip(ours).position(|(a, b)| a != b).unwrap() + lo;
+        return Some(format!("AI field +{at:03X}: ROM {:02X} ours {:02X}", rom[at - lo], ours[at - lo]));
+    }
+    let mem = cur.bytes(CPU_MEMORY[player], 10);
+    if mem != engine.cpu_memory[player] {
+        return Some(format!("CPU memory: ROM {mem:02X?} ours {:02X?}", engine.cpu_memory[player]));
+    }
+    let reads = cur.u8(CPU_READS + player as u32);
+    (reads != engine.cpu_reads[player]).then(|| format!("CPU pad reads: ROM {reads} ours {}", engine.cpu_reads[player]))
+}
+
 fn first_mismatch(engine: &Engine, cur: &Ram, tag: u8, player: usize) -> Option<String> {
     for slot in 0..SLOTS {
         if let Err(m) = slot_matches(engine, cur, tag, slot) {
             return Some(m);
         }
+    }
+    if let Some(m) = ai_mismatch(engine, cur, player) {
+        return Some(m);
     }
     (!field_matches(engine, cur, player)).then(|| {
         format!("field
@@ -490,6 +515,15 @@ fn check_piece(
     engine.glow_xy = (ram.u16(0xFF_19AC), ram.u16(0xFF_19AE));
     engine.icon_gen = [ram.u8(ICON_GEN), ram.u8(ICON_GEN + 1)];
     engine.chaining = [ram.u8(CHAINING) != 0, ram.u8(CHAINING + 1) != 0];
+    for i in 0..2 {
+        engine.ai_fields[i] = AiField::from_bytes(ram.bytes(AI_FIELD[i], off::SIZE));
+        engine.cpu_memory[i] = ram.bytes(CPU_MEMORY[i], 10).try_into().unwrap();
+        engine.cpu_reads[i] = ram.u8(CPU_READS + i as u32);
+    }
+    engine.opponent = ram.u8(0xFF_0113);
+    engine.level = ram.u8(0xFF_0112);
+    engine.control_player_1 = ram.u8(0xFF_1958);
+    engine.crowding = ram.u16(0xFF_198C);
     for slot in 0..SLOTS {
         engine.slots[slot] = load(ram, slot, tag).or_else(|| {
             used(ram, slot).then_some(if ram.u8(slot_addr(slot) + 1) & 0x80 == 0 { Actor::OpaqueQuick } else { Actor::Opaque })
@@ -583,9 +617,15 @@ fn check_piece(
         if let Some(o) = prev.player_actor(other) {
             engine.external_pending[(other & 1 ^ 1) as usize] = prev.u16(o + 0x14);
         }
+        // The other side's AI tables (its analysis feeds this side's `crowding`).
+        engine.ai_fields[player ^ 1] = AiField::from_bytes(prev.bytes(AI_FIELD[player ^ 1], off::SIZE));
+        engine.time_minutes = prev.u16(0xFF_05D0);
         if tag == P1 {
             inputs.pads[0] = PadInput { hold: cur.u8(P1_CTRL), press: cur.u8(P1_CTRL + 1), repeat: cur.u8(P1_CTRL + 2) };
             inputs.keys[0] = RotateKeys(cur.bytes(P1_KEYS, 3).try_into().unwrap());
+        } else {
+            // The pad on the CPU's port (it keeps a few of its bits).
+            inputs.pads[1] = PadInput { hold: cur.u8(P1_CTRL + 6), press: cur.u8(P1_CTRL + 7), repeat: cur.u8(P1_CTRL + 8) };
         }
         inputs.frame_count = cur.u16(FRAME_COUNT);
         // The match can end from outside (the opponent topped out): stop there.

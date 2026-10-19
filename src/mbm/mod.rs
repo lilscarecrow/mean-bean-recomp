@@ -1,4 +1,4 @@
-//! Ports of Dr. Robotnik's Mean Bean Machine (Mega Drive, USA, `GM MK-1706 -00`).
+﻿//! Ports of Dr. Robotnik's Mean Bean Machine (Mega Drive, USA, `GM MK-1706 -00`).
 //!
 //! Each item names the original routine it reproduces. Behavior is checked frame for
 //! frame against the real ROM by `tests/original_*.rs`, using RAM recordings from the
@@ -6,6 +6,7 @@
 //! only the small rule tables and animation timings the logic needs, written out by hand.
 
 pub mod actors;
+pub mod ai;
 pub mod anim;
 pub mod bean_order;
 pub mod field;

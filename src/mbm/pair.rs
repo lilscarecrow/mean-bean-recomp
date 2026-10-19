@@ -33,6 +33,25 @@ pub struct PadInput {
     pub repeat: u8,
 }
 
+/// Where the pivot gets its controller from (`sub_56C0`), asked at each point the ROM
+/// reads it: up to four times a frame (move, turn, fall, lock delay). A human's pad is
+/// the same all frame; the CPU's (`ai::CpuPad`) depends on where the pair is by then.
+pub trait PadSource {
+    fn read(&mut self, pair: &Pair) -> PadInput;
+}
+
+impl PadSource for PadInput {
+    fn read(&mut self, _: &Pair) -> PadInput {
+        *self
+    }
+}
+
+impl<T: PadSource + ?Sized> PadSource for &mut T {
+    fn read(&mut self, pair: &Pair) -> PadInput {
+        (**self).read(pair)
+    }
+}
+
 /// Rotate-button assignments for A, B, C: 0 unused, 1 turn left, 2 turn right.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RotateKeys(pub [u8; 3]);
@@ -117,7 +136,7 @@ impl Pair {
     pub fn step(
         &mut self,
         field: &Field,
-        pad: PadInput,
+        pad: impl PadSource,
         keys: RotateKeys,
         fall_speed: u16,
         frame_count: u16,
@@ -134,11 +153,11 @@ impl Pair {
     }
 
     /// The pivot actor's controlled frame ($4F14): animate, move, rotate, fall.
-    pub fn step_pivot(&mut self, field: &Field, pad: PadInput, keys: RotateKeys, fall_speed: u16, frame_count: u16) -> Step {
+    pub fn step_pivot(&mut self, field: &Field, mut pad: impl PadSource, keys: RotateKeys, fall_speed: u16, frame_count: u16) -> Step {
         self.pivot_anim.step();
-        self.slide_or_move(field, pad);
-        self.rotate(field, pad, keys);
-        self.fall(field, pad, fall_speed, frame_count)
+        self.slide_or_move(field, &mut pad);
+        self.rotate(field, &mut pad, keys);
+        self.fall(field, &mut pad, fall_speed, frame_count)
     }
 
     /// The satellite actor's frame ($5482): animate, turn.
@@ -160,7 +179,7 @@ impl Pair {
     }
 
     /// `sub_5060`.
-    fn slide_or_move(&mut self, field: &Field, pad: PadInput) {
+    fn slide_or_move(&mut self, field: &Field, pad: &mut impl PadSource) {
         if self.slide != 0 {
             let toward_zero = if self.slide & 0x8000 != 0 { 8 } else { 8u16.wrapping_neg() };
             self.slide = self.slide.wrapping_add(toward_zero);
@@ -169,6 +188,7 @@ impl Pair {
         if self.locked {
             return;
         }
+        let pad = pad.read(self);
         let (dir, dcol, slide): (u8, u16, u16) = if pad.repeat & PAD_LEFT != 0 {
             (3, 0xFFFF, 8)
         } else if pad.repeat & PAD_RIGHT != 0 {
@@ -184,11 +204,11 @@ impl Pair {
     }
 
     /// `sub_5384`.
-    fn rotate(&mut self, field: &Field, pad: PadInput, keys: RotateKeys) {
+    fn rotate(&mut self, field: &Field, pad: &mut impl PadSource, keys: RotateKeys) {
         if self.locked {
             return;
         }
-        let (turn, anim) = match keys.turn(pad.press) {
+        let (turn, anim) = match keys.turn(pad.read(self).press) {
             -1 => (3u8, 0xF8u8),
             1 => (1, 0x08),
             _ => return,
@@ -216,18 +236,19 @@ impl Pair {
     }
 
     /// `sub_50DA`.
-    fn fall(&mut self, field: &Field, pad: PadInput, fall_speed: u16, frame_count: u16) -> Step {
+    fn fall(&mut self, field: &Field, pad: &mut impl PadSource, fall_speed: u16, frame_count: u16) -> Step {
         if self.locked {
             return self.finish_lock();
         }
         if fall_speed >= 0x8001 {
             return self.fall_fast(field, pad, fall_speed);
         }
+        let read = pad.read(self);
         // Quirk: reading the pad (sub_56C0) overwrites the low byte of the register
         // holding the fall rate with the auto-repeat byte, so a sideways press nudges it.
-        let mut speed = (fall_speed & 0xFF00) | u16::from(pad.repeat);
+        let mut speed = (fall_speed & 0xFF00) | u16::from(read.repeat);
         let mut soft_drop_point = false;
-        if Self::down_only(pad) {
+        if Self::down_only(read) {
             speed = 0x8000;
             soft_drop_point = frame_count & 1 != 0;
         }
@@ -256,7 +277,7 @@ impl Pair {
     }
 
     /// `loc_5222`: fall rates above $8000 (a cell or more every other frame).
-    fn fall_fast(&mut self, field: &Field, pad: PadInput, fall_speed: u16) -> Step {
+    fn fall_fast(&mut self, field: &Field, pad: &mut impl PadSource, fall_speed: u16) -> Step {
         let falling = Step::Falling { soft_drop_point: false };
         let before = self.fall;
         let (sum, carry) = self.fall.overflowing_add(fall_speed);
@@ -283,7 +304,7 @@ impl Pair {
 
     /// `loc_5182`: resting on the stack. Start a 32-frame countdown, lock when it runs
     /// out or the player holds down.
-    fn lock_delay(&mut self, pad: PadInput, falling: Step) -> Step {
+    fn lock_delay(&mut self, pad: &mut impl PadSource, falling: Step) -> Step {
         if self.lock_timer == 0 {
             // sub_51DA reads the high byte of the column word (always 0 here): $20 frames.
             let hi = (self.col >> 8) as u8;
@@ -292,7 +313,7 @@ impl Pair {
             return falling;
         }
         self.lock_timer -= 1;
-        if self.lock_timer == 0 || Self::down_only(pad) {
+        if self.lock_timer == 0 || Self::down_only(pad.read(self)) {
             return self.lock();
         }
         falling
