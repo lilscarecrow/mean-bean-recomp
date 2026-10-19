@@ -1,0 +1,18 @@
+[package]
+name = "bean-machine"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+# 0.20 needs Rust 1.97.1; 0.19 builds on 1.95.
+bevy = "0.19"
+
+# Fast-ish debug builds: optimize dependencies (Bevy), keep our own code quick to compile.
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
+
+[dev-dependencies]
+flate2 = "1.1.10"
