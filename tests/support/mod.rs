@@ -6,6 +6,8 @@
 //! Tests that need them print a notice and pass when none are found, unless
 //! `MBM_REQUIRE_RECORDINGS=1` is set (then missing recordings fail the test).
 
+pub mod actors;
+
 use std::fs::File;
 use std::io::{BufReader, Read};
 use std::path::PathBuf;
@@ -90,6 +92,30 @@ impl Ram {
 
     pub fn u32(&self, addr: u32) -> u32 {
         u32::from_be_bytes(self.bytes(addr, 4).try_into().unwrap())
+    }
+}
+
+/// Installs the user's ROM for tests that need its data: `$MBM_ROM`, else the path in
+/// `../bean-machine-re/rom_path.txt`. Returns false (after a notice) when there is none,
+/// unless `MBM_REQUIRE_RECORDINGS=1` is set (then it fails).
+pub fn install_rom() -> bool {
+    let path = std::env::var_os("MBM_ROM").map(PathBuf::from).or_else(|| {
+        let f = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../bean-machine-re/rom_path.txt");
+        std::fs::read_to_string(f).ok().map(|s| PathBuf::from(s.trim()))
+    });
+    let result = match &path {
+        Some(p) => bean_machine::mbm::rom::install_from(p),
+        None => Err("no ROM (set MBM_ROM or write ../bean-machine-re/rom_path.txt)".into()),
+    };
+    match result {
+        Ok(()) => true,
+        Err(e) => {
+            if std::env::var_os("MBM_REQUIRE_RECORDINGS").is_some() {
+                panic!("{e}");
+            }
+            eprintln!("skipping: {e}");
+            false
+        }
     }
 }
 

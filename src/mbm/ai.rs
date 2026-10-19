@@ -120,6 +120,11 @@ impl AiField {
         }
     }
 
+    /// Beans in the visible rows as of the last analysis (`pCount`).
+    pub fn count(&self) -> u16 {
+        self.word(off::COUNT)
+    }
+
     fn word(&self, at: usize) -> u16 {
         u16::from_be_bytes([self.bytes[at], self.bytes[at + 1]])
     }

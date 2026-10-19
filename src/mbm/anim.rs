@@ -2,8 +2,10 @@
 //!
 //! A script is a list of (time, frame) byte pairs: a frame shows for time+1 calls.
 //! `$FE` ends the script (the call reports done); `$FF 00 <long>` jumps and reports
-//! done too. Scripts are addressed by their original ROM addresses so state can be
-//! compared with the game's RAM (`aAnim` long at +$32, `aAnimTime` at +$22, `aFrame` +$09).
+//! done too. A time of $F0 or more picks a random time (`ActorRandomAnimTime`). Scripts
+//! are addressed by their original ROM addresses so state can be compared with the
+//! game's RAM (`aAnim` long at +$32, `aAnimTime` at +$22, `aFrame` +$09). They are read
+//! from the installed ROM (`mbm::rom`); the few written out below work without one.
 
 /// Scripts by their original addresses.
 pub mod script {
@@ -61,7 +63,22 @@ const BLOCKS: &[(u32, &[u8])] = &[
     ]),
 ];
 
+/// `ActorRandomAnimTime`: times by the entry's low 3 bits (row) and `Random & 7`.
+#[rustfmt::skip]
+const RANDOM_TIMES: [[u8; 8]; 7] = [
+    [0x30, 0x60, 0x02, 0x6C, 0x40, 0x46, 0x50, 0x5C],
+    [0x30, 0x60, 0x20, 0x6C, 0x40, 0x46, 0x50, 0x5C],
+    [0x00, 0x00, 0x00, 0x00, 0x00, 0x46, 0x50, 0x5C],
+    [0x80, 0xA0, 0x60, 0x78, 0xBD, 0xAA, 0xB4, 0xC0],
+    [0x00, 0x00, 0x00, 0x00, 0x20, 0x10, 0x0C, 0x30],
+    [0x30, 0x60, 0x00, 0x6C, 0x40, 0x46, 0x50, 0x5C],
+    [0x30, 0x60, 0x00, 0x6C, 0x40, 0x46, 0x50, 0x5C],
+];
+
 fn byte(addr: u32) -> u8 {
+    if super::rom::get().is_some() {
+        return super::rom::byte(addr);
+    }
     for &(base, bytes) in BLOCKS {
         if let Some(&b) = addr.checked_sub(base).and_then(|i| bytes.get(i as usize)) {
             return b;
@@ -97,8 +114,15 @@ impl Anim {
         Anim { ptr, time: 0, frame: 0 }
     }
 
-    /// `ActorAnimate`: returns true ("carry") when the script ended or jumped.
+    /// `ActorAnimate`: returns true ("carry") when the script ended or jumped. For
+    /// scripts without random times.
     pub fn step(&mut self) -> bool {
+        let at = self.ptr;
+        self.step_with(&mut || panic!("animation script near ${at:X} has random times: use step_with"))
+    }
+
+    /// `ActorAnimate`, drawing random frame times from `random` (`Random`).
+    pub fn step_with(&mut self, random: &mut dyn FnMut() -> u16) -> bool {
         if self.time != 0 {
             self.time -= 1;
             return false;
@@ -107,20 +131,22 @@ impl Anim {
             0xFE => true,
             0xFF => {
                 self.ptr = long(self.ptr + 2);
-                self.parse();
+                self.parse(random);
                 true
             }
             _ => {
-                self.parse();
+                self.parse(random);
                 false
             }
         }
     }
 
-    /// `ActorParseAnim` (random times, entry bytes >= $F0, aren't used by these scripts).
-    fn parse(&mut self) {
-        let t = byte(self.ptr);
-        assert!(t < 0xF0, "random animation times are not ported yet");
+    /// `ActorParseAnim`.
+    fn parse(&mut self, random: &mut dyn FnMut() -> u16) {
+        let mut t = byte(self.ptr);
+        if t >= 0xF0 {
+            t = RANDOM_TIMES[usize::from(t & 7)][usize::from(random() as u8 & 7)];
+        }
         self.time = t;
         self.frame = byte(self.ptr + 1);
         self.ptr += 2;

@@ -19,6 +19,9 @@ use super::motion::{cos, sin, Motion};
 use super::pair::{PadInput, Pair, RotateKeys, Step};
 use super::rng::Rng;
 
+mod stage;
+pub use stage::*;
+
 pub const SLOTS: usize = 64;
 /// Screen x of each field's left edge (`word_5B34`).
 pub const FIELD_X: [u16; 2] = [0x90, 0x150];
@@ -83,12 +86,31 @@ pub enum Actor {
     GarbageDrop(GarbageDrop),
     GarbageColumn(GarbageColumn),
     Icon(Icon),
+    PairHolder(PairHolder),
+    PreviewBean(PreviewBean),
+    Referee(Referee),
+    Sparkle(Sparkle),
+    Animator(Animator),
+    Danger(Danger),
+    DangerSpark(DangerSpark),
+    Portrait(Portrait),
+    PortraitPalette(PortraitPalette),
+    PaletteFade(PaletteFade),
 }
 
 impl Actor {
     /// Allocated by `FindActorSlotQuick` (pop visuals): `FindActorSlot` may evict it.
     pub fn evictable(&self) -> bool {
-        matches!(self, Actor::Burst(_) | Actor::Piece(_) | Actor::GarbageClear(_) | Actor::Icon(_) | Actor::OpaqueQuick)
+        matches!(
+            self,
+            Actor::Burst(_)
+                | Actor::Piece(_)
+                | Actor::GarbageClear(_)
+                | Actor::Icon(_)
+                | Actor::OpaqueQuick
+                | Actor::Sparkle(_)
+                | Actor::DangerSpark(_)
+        )
     }
 
     /// The original resume address of this actor's current state (None for `Opaque`).
@@ -106,6 +128,16 @@ impl Actor {
             Actor::GarbageDrop(d) => Some(if d.started { 0x48BA } else { 0x48A2 }),
             Actor::GarbageColumn(c) => Some(if c.landed { 0x5044 } else { 0x486A }),
             Actor::Icon(_) => Some(0x9962),
+            Actor::PairHolder(_) => Some(PAIR_HOLDER_CODE),
+            Actor::PreviewBean(_) => Some(PREVIEW_BEAN_CODE),
+            Actor::Referee(r) => Some(r.state.code()),
+            Actor::Sparkle(_) => Some(SPARKLE_CODE),
+            Actor::Animator(_) => Some(ANIMATOR_CODE),
+            Actor::Danger(_) => Some(DANGER_CODE),
+            Actor::DangerSpark(s) => Some(s.state.code()),
+            Actor::Portrait(_) => Some(PORTRAIT_CODE),
+            Actor::PortraitPalette(_) => Some(PORTRAIT_PALETTE_CODE),
+            Actor::PaletteFade(_) => Some(PALETTE_FADE_CODE),
         }
     }
 }
@@ -114,6 +146,8 @@ impl Actor {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PlayerState {
+    /// $3DA0: before the match starts, until the referee clears flag bit 1.
+    WaitStart,
     /// $3E6E: pair in play; count frames, wait for both beans to be written.
     WaitPair,
     /// $3E9A: look for pops (`sub_5960`).
@@ -155,6 +189,7 @@ pub enum PlayerState {
 impl PlayerState {
     pub fn code(self) -> u32 {
         match self {
+            PlayerState::WaitStart => 0x3DA0,
             PlayerState::WaitPair => 0x3E6E,
             PlayerState::FindPops => 0x3E9A,
             PlayerState::Redraw => 0x3EA6,
@@ -216,6 +251,9 @@ pub struct Player {
     pub target: (u8, u8),
     pub move_frames: u8,
     pub pause_frames: u8,
+    /// The other player's actor (+$2E) and this player's pair holder (+$32).
+    pub other_slot: usize,
+    pub holder_slot: Option<usize>,
     /// Work for the chain step in progress.
     pub pop: Option<PopWork>,
 }
@@ -606,8 +644,7 @@ pub struct Icon {
 pub struct Inputs {
     pub pads: [PadInput; 2],
     pub keys: [RotateKeys; 2],
-    pub frame_count: u16,
-    /// The next pair each player will get (pivot, satellite): bean order isn't wired in yet.
+    /// The next pair (pivot, satellite) for a player with no pair holder in the engine.
     pub next_pair: [Option<(BeanColor, BeanColor)>; 2],
     /// Slots the next spawned pivot/satellite get, when the caller wants to force them
     /// (slots of actors this port doesn't model can't be predicted yet).
@@ -756,6 +793,23 @@ pub struct Engine {
     pub level: u8,
     pub time_minutes: u16,
     pub control_player_1: u8,
+    /// `frame_count`: counted by every vertical blank (soft-drop points on odd ones).
+    pub frame_count: u16,
+    /// `time_frames` (`HandleTime`, counted in the vertical blank while neither player
+    /// is out); `time_minutes` follows from it.
+    pub time_frames: u16,
+    /// `player_1_flags` / `player_2_flags`: $7F once a player has started, bit 7 when out.
+    pub player_flags: [u8; 2],
+    /// `p1_puyo_order` / `p2_puyo_order`: the pairs dealt, two bytes each.
+    pub bean_orders: [[u8; 256]; 2],
+    /// `word_FF19A8`: high byte bit 7 = something hit the referee (not ported).
+    pub referee_hit: u16,
+    /// `byte_FF1121`: the danger effect is flashing (the portrait palette waits).
+    pub danger_flash: u8,
+    /// `word_FF1124`: high byte set = the portrait actors end.
+    pub portrait_lock: u16,
+    /// The generation word of each palette line's fade (`pal_fade_data`, $82 apart).
+    pub pal_fade_gen: [u16; 4],
 }
 
 impl Engine {
@@ -788,6 +842,14 @@ impl Engine {
             level: 0,
             time_minutes: 0,
             control_player_1: 0xFF,
+            frame_count: 0,
+            time_frames: 0,
+            player_flags: [0; 2],
+            bean_orders: [[0; 256]; 2],
+            referee_hit: 0,
+            danger_flash: 0,
+            portrait_lock: 0,
+            pal_fade_gen: [0; 4],
         }
     }
 
@@ -876,6 +938,7 @@ impl Engine {
     /// `Random`. (When the logic overruns a video frame, the ROM's vertical blank lands
     /// in the middle of `RunActors`; see `run_slots`.)
     pub fn vblank(&mut self) {
+        self.frame_count = self.frame_count.wrapping_add(1);
         self.rng_calls = 0;
         self.icons_drawn = [false; 2];
         self.rng_users.clear();
@@ -884,6 +947,11 @@ impl Engine {
             self.run_fall_command(slot);
         }
         self.random();
+        // HandleTime
+        if (self.player_flags[0] | self.player_flags[1]) & 0x80 == 0 {
+            self.time_frames = self.time_frames.saturating_add(1);
+        }
+        self.time_minutes = self.time_frames / 3600;
     }
 
     /// `RunActors` over some of the slots (all of them in a normal frame).
@@ -916,6 +984,16 @@ impl Engine {
                 Actor::GarbageDrop(d) => self.run_garbage_drop(d).map(Actor::GarbageDrop),
                 Actor::GarbageColumn(c) => self.run_garbage_column(c).map(Actor::GarbageColumn),
                 Actor::Icon(i) => self.run_icon(i).map(Actor::Icon),
+                Actor::PairHolder(h) => Some(Actor::PairHolder(h)),
+                Actor::PreviewBean(v) => self.run_preview_bean(v).map(Actor::PreviewBean),
+                Actor::Referee(r) => self.run_referee(r, inputs)?.map(Actor::Referee),
+                Actor::Sparkle(sp) => self.run_sparkle(sp).map(Actor::Sparkle),
+                Actor::Animator(a) => self.run_animator(a).map(Actor::Animator),
+                Actor::Danger(d) => self.run_danger(d).map(Actor::Danger),
+                Actor::DangerSpark(sp) => self.run_danger_spark(sp).map(Actor::DangerSpark),
+                Actor::Portrait(pt) => self.run_portrait(pt).map(Actor::Portrait),
+                Actor::PortraitPalette(pt) => self.run_portrait_palette(pt).map(Actor::PortraitPalette),
+                Actor::PaletteFade(pf) => self.run_palette_fade(pf).map(Actor::PaletteFade),
             };
             self.slots[slot] = next;
         }
@@ -1027,19 +1105,20 @@ impl Engine {
                     p.state = AfterDelay;
                 }
             }
+            WaitStart => {
+                if p.flags & 2 == 0 {
+                    // loc_3DAC: sub_3CFA
+                    if self.level_mode & 4 == 0 {
+                        self.player_flags[p.id as usize & 1] = 0x7F;
+                    }
+                    self.drop_garbage_and_wait(slot, &mut p);
+                }
+            }
             AfterDelay => {
                 if p.chain != 0 && self.level_mode & 2 == 0 {
                     self.send_garbage(slot, &mut p);
                 }
-                // loc_3DB0
-                p.chain = 0;
-                self.chaining[p.id as usize & 1] = false;
-                self.spawn_garbage(slot, &mut p);
-                if self.level_mode & 2 == 0 && !self.chaining[(p.id as usize & 1) ^ 1] {
-                    // sub_9814: this player's own incoming garbage.
-                    self.show_icons(p.id ^ 1, u32::from(p.pending_garbage));
-                }
-                p.state = WaitGarbage;
+                self.drop_garbage_and_wait(slot, &mut p);
             }
             WaitGarbage => {
                 if p.flags & flag::GARBAGE_FALLING == 0 {
@@ -1080,16 +1159,36 @@ impl Engine {
         Ok(Some(p))
     }
 
+    /// `loc_3DB0`: the chain (if any) is over; drop this player's pending garbage,
+    /// show its icons, then wait for the garbage to land.
+    fn drop_garbage_and_wait(&mut self, slot: usize, p: &mut Player) {
+        p.chain = 0;
+        self.chaining[p.id as usize & 1] = false;
+        self.spawn_garbage(slot, p);
+        if self.level_mode & 2 == 0 && !self.chaining[(p.id as usize & 1) ^ 1] {
+            // sub_9814: this player's own incoming garbage.
+            self.show_icons(p.id ^ 1, u32::from(p.pending_garbage));
+        }
+        p.state = PlayerState::WaitGarbage;
+    }
+
     /// `sub_127BA`: where the CPU puts the pair about to spawn.
     fn plan(&mut self, p: &mut Player, inputs: &Inputs) -> Result<(), Unported> {
         let id = p.id as usize;
-        let (pivot, sat) = inputs.next_pair[id].ok_or(Unported("no next pair given"))?;
+        let holder = p.holder_slot.and_then(|h| match &self.slots[h] {
+            Some(Actor::PairHolder(h)) => Some((h.pairs[0], h.pairs[1])),
+            _ => None,
+        });
+        let (pivot, sat) = match holder {
+            Some(pair) => pair,
+            None => inputs.next_pair[id].map(|(a, b)| (a as u8, b as u8)).ok_or(Unported("no next pair given"))?,
+        };
         let ctx = ai::PlanContext {
             player_id: p.id,
             opponent: self.opponent,
             difficulty: self.difficulty,
             time_minutes: self.time_minutes,
-            pair: (pivot as u8, sat as u8),
+            pair: (pivot, sat),
         };
         let mut plan = player_plan(p);
         let mut scratch = ai::PlanScratch::default();
@@ -1510,7 +1609,15 @@ impl Engine {
         if self.fields[id].get(2, 2).is_some() {
             return Err(Unported("game over (spawn cell filled)"));
         }
-        let (pivot_color, sat_color) = inputs.next_pair[id].ok_or(Unported("no next pair given"))?;
+        let holder = p.holder_slot.filter(|&h| matches!(self.slots[h], Some(Actor::PairHolder(_))));
+        let (pivot_color, sat_color) = match holder {
+            Some(h) => {
+                let (a, b) = self.deal_pair(h, p)?;
+                let color = |c: u8| BeanColor::from_id(c).ok_or(Unported("special pieces (sub_4E24)"));
+                (color(a)?, color(b)?)
+            }
+            None => inputs.next_pair[id].ok_or(Unported("no next pair given"))?,
+        };
         let (pivot_slot, sat_slot) = match inputs.spawn_slots[id] {
             Some(slots) => slots,
             None => {
@@ -1580,14 +1687,15 @@ impl Engine {
                         lean: &mut self.cpu_lean,
                         rng: &mut self.rng,
                     };
-                    let step = v.pair.step_pivot(&self.fields[id], pad, ai::CPU_KEYS, fall_speed, inputs.frame_count);
+                    let step = v.pair.step_pivot(&self.fields[id], pad, ai::CPU_KEYS, fall_speed, self.frame_count);
                     self.note_draws(before);
                     set_player_plan(self.player_mut(v.player_slot), plan);
                     step
                 } else {
-                    v.pair.step_pivot(&self.fields[id], inputs.pads[id], inputs.keys[id], fall_speed, inputs.frame_count)
+                    v.pair.step_pivot(&self.fields[id], inputs.pads[id], inputs.keys[id], fall_speed, self.frame_count)
                 };
-                if let Step::Falling { soft_drop_point: true } = step {
+                let (step, soft_drop_point) = step;
+                if soft_drop_point {
                     self.player_mut(v.player_slot).flags |= flag::SOFT_DROP_POINT;
                 }
                 v.place();

@@ -7,324 +7,13 @@ mod support;
 
 use bean_machine::mbm::actors::*;
 use bean_machine::mbm::ai::{off, AiField};
-use bean_machine::mbm::anim::Anim;
 use bean_machine::mbm::field::Field;
-use bean_machine::mbm::motion::Motion;
 use bean_machine::mbm::Rng;
-use bean_machine::mbm::pair::{PadInput, Pair, RotateKeys};
-use bean_machine::mbm::BeanColor;
+use bean_machine::mbm::pair::{PadInput, RotateKeys};
+use support::actors::*;
 use support::{frames, recordings, Ram, FRAME_COUNT, P1, P1_CTRL, P1_KEYS, P2};
 
 const RNG_SEED: u32 = 0xFF_1116;
-const ICON_GEN: u32 = 0xFF_19B0;
-const CHAINING: u32 = 0xFF_19B2;
-const ICON_CODE: u32 = 0x9962;
-
-fn icon_side(ram: &Ram, a: u32) -> u8 {
-    (ram.u32(a + 0x32).wrapping_sub(ICON_GEN) & 1) as u8
-}
-
-
-const ACTORS: u32 = 0xFF_E000;
-
-fn slot_addr(slot: usize) -> u32 {
-    ACTORS + slot as u32 * 0x40
-}
-
-fn slot_of(addr: u32) -> usize {
-    ((addr - ACTORS) / 0x40) as usize
-}
-
-/// A slot is taken when its first word is nonzero (`FindActorSlotQuick`'s test; only
-/// `FindActorSlot` also sets bit 7 of the second byte).
-fn used(ram: &Ram, slot: usize) -> bool {
-    ram.u16(slot_addr(slot)) != 0
-}
-
-fn anim_from(ram: &Ram, a: u32) -> Anim {
-    Anim { ptr: ram.u32(a + 0x32), time: ram.u8(a + 0x22), frame: ram.u8(a + 0x09) }
-}
-
-fn color(ram: &Ram, a: u32) -> BeanColor {
-    BeanColor::from_id(ram.u8(a + 8)).unwrap()
-}
-
-fn fall_from(ram: &Ram, a: u32) -> Fall {
-    Fall { y: ram.u32(a + 0x0E), vel: ram.u32(a + 0x16), accel: ram.u16(a + 0x1E), base: ram.u16(a + 0x20) }
-}
-
-/// Rebuilds a ported actor from RAM by its resume address; None if it isn't one.
-fn load(ram: &Ram, slot: usize, tag: u8) -> Option<Actor> {
-    let a = slot_addr(slot);
-    if !used(ram, slot) {
-        return None;
-    }
-    let code = ram.code(a);
-    // Icons belong to no player (tag $FF) and behave the same whoever drew them.
-    if code == ICON_CODE {
-        return Some(Actor::Icon(Icon {
-            side: icon_side(ram, a),
-            generation: ram.u8(a + 0x28),
-            frame: ram.u8(a + 9),
-            motion: Motion { x: ram.u32(a + 0x0A), y: ram.u32(a + 0x0E), vx: ram.u32(a + 0x12), ..Motion::default() },
-            slide: ram.u16(a + 0x26),
-        }));
-    }
-    if ram.u8(a) != tag {
-        return None;
-    }
-    if code == 0x48A2 || code == 0x48BA {
-        return Some(Actor::GarbageDrop(GarbageDrop {
-            player_slot: slot_of(ram.u32(a + 0x2E)),
-            started: code == 0x48BA,
-            falling: ram.u16(a + 0x26),
-            seen: ram.u16(a + 0x28),
-            strength: ram.u16(a + 0x20),
-            shake: ram.u16(a + 0x38),
-            phase: ram.u8(a + 0x36),
-            voiced: ram.u8(a + 7) & 1 != 0,
-            frame: ram.u8(a + 9),
-        }));
-    }
-    if code == 0x486A || code == 0x5044 {
-        return Some(Actor::GarbageColumn(GarbageColumn {
-            player: ram.u8(a + 0x2A),
-            drop_slot: slot_of(ram.u32(a + 0x2E)),
-            col: ram.u16(a + 0x1A),
-            row: ram.u16(a + 0x1C),
-            frame: ram.u8(a + 9),
-            fall: fall_from(ram, a),
-            landed: code == 0x5044,
-            linger: ram.u16(a + 0x26),
-        }));
-    }
-    let player_state = [
-        PlayerState::WaitPair,
-        PlayerState::FindPops,
-        PlayerState::Redraw,
-        PlayerState::Decide,
-        PlayerState::SettleDelay,
-        PlayerState::AfterDelay,
-        PlayerState::WaitGarbage,
-        PlayerState::PreSpawn1,
-        PlayerState::PreSpawn2,
-        PlayerState::PreSpawn3,
-        PlayerState::Spawn,
-        PlayerState::PopScore,
-        PlayerState::PopBackup,
-        PlayerState::Blink,
-        PlayerState::PopSpawn,
-        PlayerState::PopWait,
-        PlayerState::Compact,
-        PlayerState::FallWait,
-        PlayerState::ChainNext,
-    ]
-    .into_iter()
-    .find(|s| s.code() == code);
-    if let Some(state) = player_state {
-        return Some(Actor::Player(Player {
-            id: ram.u8(a + 0x2A),
-            state,
-            flags: ram.u8(a + 7),
-            w26: ram.u16(a + 0x26),
-            delay: ram.u16(a + 0x24),
-            chain: ram.u8(a + 9),
-            fall_speed: ram.u16(a + 0x1A),
-            speed_level: ram.u8(a + 0x2B),
-            target: (ram.u8(a + 0x20), ram.u8(a + 0x21)),
-            move_frames: ram.u8(a + 0x2C),
-            pause_frames: ram.u8(a + 0x2D),
-            pending_garbage: ram.u16(a + 0x14),
-            speed_index: ram.u8(a + 0x08),
-            score: ram.u32(a + 0x0A),
-            acc: ram.u32(a + 0x0E),
-            base: ram.u16(a + 0x12),
-            bonus: ram.u16(a + 0x1E),
-            beans_total: ram.u16(a + 0x16),
-            beans_count: ram.u16(a + 0x18),
-            threshold: ram.u16(a + 0x1C),
-            garbage_sent: 0,
-            pop: None,
-        }));
-    }
-    let pivot_state = [PivotState::Falling, PivotState::Squash].into_iter().find(|s| s.code() == code);
-    if let Some(state) = pivot_state {
-        let sat = ram.u32(a + 0x36);
-        return Some(Actor::Pivot(Pivot {
-            player_slot: slot_of(ram.u32(a + 0x2E)),
-            satellite_slot: slot_of(sat),
-            color: color(ram, a),
-            state,
-            pair: Pair {
-                col: ram.u16(a + 0x1A),
-                row: ram.u16(a + 0x1C),
-                rot: ram.u8(a + 0x2B),
-                pivot_anim: anim_from(ram, a),
-                sat_anim: anim_from(ram, sat),
-                ..Pair::default()
-            },
-            flags: ram.u8(a + 7),
-            y: ram.u32(a + 0x0E),
-            fall: fall_from(ram, a),
-        }));
-    }
-    let sat_state = [SatelliteState::Check, SatelliteState::Falling, SatelliteState::Squash].into_iter().find(|s| s.code() == code);
-    if let Some(state) = sat_state {
-        return Some(Actor::Satellite(Satellite {
-            pivot_slot: usize::MAX,
-            player_slot: slot_of(ram.u32(a + 0x2E)),
-            color: color(ram, a),
-            state,
-            col: ram.u16(a + 0x1A),
-            row: ram.u16(a + 0x1C),
-            flags: ram.u8(a + 7),
-            y: ram.u32(a + 0x0E),
-            anim: anim_from(ram, a),
-            fall: fall_from(ram, a),
-        }));
-    }
-    let motion = || Motion {
-        x: ram.u32(a + 0x0A),
-        y: ram.u32(a + 0x0E),
-        vx: ram.u32(a + 0x12),
-        vy: ram.u32(a + 0x16),
-        ax: ram.u16(a + 0x1A),
-        ay: ram.u16(a + 0x1C),
-        tx: ram.u16(a + 0x1E),
-        ty: ram.u16(a + 0x20),
-    };
-    if let Some(state) = [BurstState::Wait, BurstState::Burst, BurstState::Animate].into_iter().find(|s| s.code() == code) {
-        return Some(Actor::Burst(Burst {
-            player: ram.u8(a + 0x2A),
-            color: ram.u8(a + 8),
-            x: ram.u16(a + 0x0A),
-            y: ram.u16(a + 0x0E),
-            delay: ram.u16(a + 0x24),
-            anim: anim_from(ram, a),
-            state,
-        }));
-    }
-    if let Some(state) = [PieceState::Start, PieceState::Wait, PieceState::Fly].into_iter().find(|s| s.code() == code) {
-        return Some(Actor::Piece(Piece {
-            player: 0,
-            color: ram.u8(a + 8),
-            motion: motion(),
-            draw: ram.u8(a + 6),
-            delay: ram.u16(a + 0x24),
-            anim: anim_from(ram, a),
-            state,
-        }));
-    }
-    if code == 0x4DA4 {
-        return Some(Actor::GarbageClear(GarbageClear { player: 0, x: ram.u16(a + 0x0A), y: ram.u16(a + 0x0E), anim: anim_from(ram, a) }));
-    }
-    let glow_states = [GlowState::Start, GlowState::Hover, GlowState::HoverWait, GlowState::Launch, GlowState::Fly, GlowState::End];
-    if let Some(state) = glow_states.into_iter().find(|s| s.code() == code) {
-        return Some(Actor::Glow(Glow {
-            player: ram.u8(a + 0x2A),
-            player_slot: slot_of(ram.u32(a + 0x2E)),
-            chain: ram.u8(a + 0x2B),
-            motion: motion(),
-            draw: ram.u8(a + 6),
-            base_x: ram.u16(a + 0x1E),
-            counter: ram.u16(a + 0x26),
-            delay: ram.u16(a + 0x24),
-            anim: anim_from(ram, a),
-            state,
-        }));
-    }
-    let effect_state = [EffectState::Wait, EffectState::Start, EffectState::Rise].into_iter().find(|s| s.code() == code);
-    effect_state.map(|state| {
-        Actor::Effect(Effect {
-            player: ram.u8(a + 0x2A),
-            state,
-            delay: ram.u16(a + 0x24),
-            steps_left: ram.u8(a + 0x26),
-            ticks: ram.u8(a + 0x28),
-            y: ram.u32(a + 0x0E),
-        })
-    })
-}
-
-/// The parts of a ported actor the ROM's RAM must agree with.
-fn describe(actor: &Actor) -> String {
-    match actor {
-        Actor::Opaque | Actor::OpaqueQuick | Actor::Vanishing => "opaque".into(),
-        Actor::Player(p) => format!(
-            "player {:04X} flags {:02X} delay {} chain {} score {} acc {} base {} bonus {} beans {}/{} speed {:04X} step {} next {} w26 {:04X} cpu {:?} {} {}",
-            p.state.code(),
-            p.flags & 0x17,
-            p.delay,
-            p.chain,
-            p.score,
-            p.acc,
-            p.base,
-            p.bonus,
-            p.beans_total,
-            p.beans_count,
-            p.fall_speed,
-            p.speed_index,
-            p.threshold,
-            p.w26,
-            p.target,
-            p.move_frames,
-            p.pause_frames,
-        ),
-        Actor::Pivot(v) => match v.state {
-            PivotState::Init | PivotState::Controlled => format!("pivot {:04X}", v.state.code()),
-            _ => format!(
-                "pivot {:04X} col {} row {} y {:08X} vel {:08X} anim {:?} flags {:02X}",
-                v.state.code(), v.pair.col, v.pair.row, v.y, v.fall.vel, v.pair.pivot_anim, v.flags
-            ),
-        },
-        Actor::Satellite(s) => match s.state {
-            SatelliteState::Init | SatelliteState::Follow => format!("satellite {:04X}", s.state.code()),
-            _ => format!(
-                "satellite {:04X} col {} row {} y {:08X} vel {:08X} anim {:?} flags {:02X}",
-                s.state.code(), s.col, s.row, s.y, s.fall.vel, s.anim, s.flags
-            ),
-        },
-        Actor::Effect(e) => format!("effect {:04X} delay {} steps {} ticks {} y {:08X}", e.state.code(), e.delay, e.steps_left, e.ticks, e.y),
-        Actor::Burst(b) => format!("burst {:04X} color {} at {:X},{:X} delay {} anim {:?}", b.state.code(), b.color, b.x, b.y, b.delay, b.anim),
-        Actor::Piece(p) => format!(
-            "piece {:04X} color {} pos {:08X},{:08X} vel {:08X},{:08X} draw {:02X} delay {} anim {:?}",
-            p.state.code(), p.color, p.motion.x, p.motion.y, p.motion.vx, p.motion.vy, p.draw, p.delay, p.anim
-        ),
-        Actor::GarbageClear(g) => format!("garbage clear at {:X},{:X} anim {:?}", g.x, g.y, g.anim),
-        Actor::GarbageDrop(d) => format!(
-            "garbage drop {:04X} falling {} seen {} strength {:04X} shake {:04X} phase {:02X} frame {:02X}",
-            if d.started { 0x48BA } else { 0x48A2 }, d.falling, d.seen, d.strength, d.shake, d.phase, d.frame
-        ),
-        Actor::GarbageColumn(c) => format!(
-            "garbage column {:04X} col {} row {} frame {:02X} y {:08X} vel {:08X} linger {}",
-            if c.landed { 0x5044 } else { 0x486A }, c.col, c.row, c.frame, c.fall.y, c.fall.vel, c.linger
-        ),
-        Actor::Icon(i) => format!(
-            "icon side {} gen {} frame {} x {:08X} y {:08X} vx {:08X} slide {}",
-            i.side, i.generation, i.frame, i.motion.x, i.motion.y, i.motion.vx, i.slide
-        ),
-        Actor::Glow(g) => format!(
-            "glow {:05X} chain {} pos {:08X},{:08X} vel {:08X},{:08X} base {:X} counter {:04X} draw {:02X} delay {} anim {:?}",
-            g.state.code(), g.chain, g.motion.x, g.motion.y, g.motion.vx, g.motion.vy, g.base_x, g.counter, g.draw, g.delay, g.anim
-        ),
-    }
-}
-
-/// What the ROM shows in a slot, described the same way (None = not a ported actor).
-fn describe_ram(ram: &Ram, slot: usize, tag: u8, ours: &Actor) -> Option<String> {
-    if let Some(actor) = load(ram, slot, tag) {
-        return Some(describe(&actor));
-    }
-    // Spawned and controlled pairs can't be rebuilt from RAM alone: compare codes only.
-    let code = ram.code(slot_addr(slot));
-    match ours {
-        Actor::Pivot(_) if [0x4F06, 0x4F14].contains(&code) => Some(format!("pivot {code:04X}")),
-        Actor::Satellite(_) if [0x5474, 0x5482].contains(&code) => Some(format!("satellite {code:04X}")),
-        _ => None,
-    }
-}
-
-
 /// Icons the opponent drew this frame appear in the ROM without us making them (add
 /// them), and its redraws can retire icons of ours before their turn (drop them).
 fn absorb_foreign_icons(engine: &mut Engine, cur: &Ram, tag: u8) {
@@ -363,17 +52,22 @@ fn splits(n: u32, gaps: usize) -> Vec<Vec<u32>> {
     out
 }
 
-/// Resume addresses of every actor state the port knows.
-fn known_code(code: u32) -> bool {
-    matches!(code, 0x3D00..=0x40FF | 0x4F06 | 0x4F14 | 0x5474 | 0x5482) || load_codes().contains(&code)
-}
-
-fn load_codes() -> Vec<u32> {
-    let mut v = vec![0x4F8A, 0x4FA8, 0x54D4, 0x54FA, 0x5514, 0x4FCE, 0x4FE6, 0x4FF4, 0x4DA4];
-    v.extend([BurstState::Wait, BurstState::Burst, BurstState::Animate].map(|s| s.code()));
-    v.extend([PieceState::Start, PieceState::Wait, PieceState::Fly].map(|s| s.code()));
-    v.extend([GlowState::Start, GlowState::Hover, GlowState::HoverWait, GlowState::Launch, GlowState::Fly, GlowState::End].map(|s| s.code()));
-    v
+/// Actors around the fields (holders, referee, portrait, fades...): mirrored as opaque
+/// by this test, which only follows one player's pieces.
+fn is_match_level(a: &Actor) -> bool {
+    matches!(
+        a,
+        Actor::PairHolder(_)
+            | Actor::PreviewBean(_)
+            | Actor::Referee(_)
+            | Actor::Sparkle(_)
+            | Actor::Animator(_)
+            | Actor::Danger(_)
+            | Actor::DangerSpark(_)
+            | Actor::Portrait(_)
+            | Actor::PortraitPalette(_)
+            | Actor::PaletteFade(_)
+    )
 }
 
 /// Does the ROM's RAM show the ported actor in `slot` as we have it?
@@ -619,7 +313,7 @@ fn check_piece(
         }
         // The other side's AI tables (its analysis feeds this side's `crowding`).
         engine.ai_fields[player ^ 1] = AiField::from_bytes(prev.bytes(AI_FIELD[player ^ 1], off::SIZE));
-        engine.time_minutes = prev.u16(0xFF_05D0);
+        engine.time_frames = prev.u16(0xFF_05CA); // HandleTime advances it in the vertical blank
         if tag == P1 {
             inputs.pads[0] = PadInput { hold: cur.u8(P1_CTRL), press: cur.u8(P1_CTRL + 1), repeat: cur.u8(P1_CTRL + 2) };
             inputs.keys[0] = RotateKeys(cur.bytes(P1_KEYS, 3).try_into().unwrap());
@@ -627,7 +321,7 @@ fn check_piece(
             // The pad on the CPU's port (it keeps a few of its bits).
             inputs.pads[1] = PadInput { hold: cur.u8(P1_CTRL + 6), press: cur.u8(P1_CTRL + 7), repeat: cur.u8(P1_CTRL + 8) };
         }
-        inputs.frame_count = cur.u16(FRAME_COUNT);
+        engine.frame_count = prev.u16(FRAME_COUNT); // the vertical blank counts it
         // The match can end from outside (the opponent topped out): stop there.
         let player_slot = engine.slots.iter().position(|s| matches!(s, Some(Actor::Player(_)))).unwrap();
         let pa = slot_addr(player_slot);
@@ -650,7 +344,12 @@ fn check_piece(
         let overwritten = (0..SLOTS).any(|slot| {
             let ours = matches!(&engine.slots[slot], Some(a) if a.code().is_some());
             let a = slot_addr(slot);
-            ours && used(cur, slot) && cur.u8(a) == tag && load(cur, slot, tag).is_none() && !known_code(cur.code(a))
+            // (Match-level actors, which this test never runs, count as unported.)
+            let foreign = match load(cur, slot, tag) {
+                None => !known_code(cur.code(a)),
+                Some(actor) => is_match_level(&actor),
+            };
+            ours && used(cur, slot) && cur.u8(a) == tag && foreign
         });
         if overwritten {
             *stats.unported.entry("slot overwritten by an unported actor").or_default() += 1;

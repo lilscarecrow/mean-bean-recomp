@@ -3,7 +3,8 @@
 //! Each item names the original routine it reproduces. Behavior is checked frame for
 //! frame against the real ROM by `tests/original_*.rs`, using RAM recordings from the
 //! private harness (see `tests/support/mod.rs`). No ROM code, graphics or sound live here:
-//! only the small rule tables and animation timings the logic needs, written out by hand.
+//! only the small rule tables the logic needs, written out by hand. Data such as
+//! animation scripts is read at runtime from the user's ROM ([`rom`]).
 
 pub mod actors;
 pub mod ai;
@@ -13,6 +14,7 @@ pub mod field;
 pub mod motion;
 pub mod pair;
 pub mod rng;
+pub mod rom;
 
 pub use bean_order::{gen_bean_orders, BeanColor, BeanOrders};
 pub use rng::Rng;

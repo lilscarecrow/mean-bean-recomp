@@ -102,8 +102,8 @@ pub struct Pair {
 /// What a frame did.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Step {
-    /// Still falling; `soft_drop_point` = the player earns a point for holding down.
-    Falling { soft_drop_point: bool },
+    /// Still falling (or finishing a slide or turn after locking).
+    Falling,
     /// Locked in place: the beans now drop into the field.
     Landed,
 }
@@ -132,7 +132,8 @@ impl Pair {
 
     /// One frame. `fall_speed` is the player's per-frame fall rate ($1A of the player
     /// actor); `frame_count` decides soft-drop points; `satellite_first` is true when the
-    /// satellite's actor slot comes before the pivot's (it then animates first).
+    /// satellite's actor slot comes before the pivot's (it then animates first). The
+    /// soft-drop point is dropped here: see [`Pair::step_pivot`].
     pub fn step(
         &mut self,
         field: &Field,
@@ -145,19 +146,30 @@ impl Pair {
         if satellite_first {
             self.step_satellite();
         }
-        let step = self.step_pivot(field, pad, keys, fall_speed, frame_count);
+        let (step, _) = self.step_pivot(field, pad, keys, fall_speed, frame_count);
         if !satellite_first {
             self.step_satellite();
         }
         step
     }
 
-    /// The pivot actor's controlled frame ($4F14): animate, move, rotate, fall.
-    pub fn step_pivot(&mut self, field: &Field, mut pad: impl PadSource, keys: RotateKeys, fall_speed: u16, frame_count: u16) -> Step {
+    /// The pivot actor's controlled frame ($4F14): animate, move, rotate, fall. Also
+    /// says whether the player earns a soft-drop point (`sub_50DA` sets the player's
+    /// flag as soon as it sees down held on an odd frame, whatever the pair does next).
+    pub fn step_pivot(
+        &mut self,
+        field: &Field,
+        mut pad: impl PadSource,
+        keys: RotateKeys,
+        fall_speed: u16,
+        frame_count: u16,
+    ) -> (Step, bool) {
         self.pivot_anim.step();
         self.slide_or_move(field, &mut pad);
         self.rotate(field, &mut pad, keys);
-        self.fall(field, &mut pad, fall_speed, frame_count)
+        let mut soft_drop_point = false;
+        let step = self.fall(field, &mut pad, fall_speed, frame_count, &mut soft_drop_point);
+        (step, soft_drop_point)
     }
 
     /// The satellite actor's frame ($5482): animate, turn.
@@ -236,7 +248,7 @@ impl Pair {
     }
 
     /// `sub_50DA`.
-    fn fall(&mut self, field: &Field, pad: &mut impl PadSource, fall_speed: u16, frame_count: u16) -> Step {
+    fn fall(&mut self, field: &Field, pad: &mut impl PadSource, fall_speed: u16, frame_count: u16, soft_drop_point: &mut bool) -> Step {
         if self.locked {
             return self.finish_lock();
         }
@@ -247,12 +259,11 @@ impl Pair {
         // Quirk: reading the pad (sub_56C0) overwrites the low byte of the register
         // holding the fall rate with the auto-repeat byte, so a sideways press nudges it.
         let mut speed = (fall_speed & 0xFF00) | u16::from(read.repeat);
-        let mut soft_drop_point = false;
         if Self::down_only(read) {
             speed = 0x8000;
-            soft_drop_point = frame_count & 1 != 0;
+            *soft_drop_point = frame_count & 1 != 0;
         }
-        let falling = Step::Falling { soft_drop_point };
+        let falling = Step::Falling;
         let (sum, carry) = self.fall.overflowing_add(speed);
         if carry {
             // Reached the next cell.
@@ -278,7 +289,7 @@ impl Pair {
 
     /// `loc_5222`: fall rates above $8000 (a cell or more every other frame).
     fn fall_fast(&mut self, field: &Field, pad: &mut impl PadSource, fall_speed: u16) -> Step {
-        let falling = Step::Falling { soft_drop_point: false };
+        let falling = Step::Falling;
         let before = self.fall;
         let (sum, carry) = self.fall.overflowing_add(fall_speed);
         self.fall = sum;
@@ -327,7 +338,7 @@ impl Pair {
 
     fn finish_lock(&mut self) -> Step {
         if self.slide != 0 || self.sat_turn != 0 {
-            Step::Falling { soft_drop_point: false }
+            Step::Falling
         } else {
             Step::Landed
         }

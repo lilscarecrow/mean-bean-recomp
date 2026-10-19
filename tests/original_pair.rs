@@ -77,14 +77,17 @@ fn run(input_lag: usize) -> (usize, Option<String>) {
             let mut pair = pair_from(prev, pivot, sat);
             // The fall rate can change during the frame; whichever actor runs first wins.
             let speed = if player < pivot { cur.u16(player + 0x1A) } else { prev.u16(player + 0x1A) };
-            let step = pair.step(
-                &field,
-                pad(inputs),
-                keys,
-                speed,
-                inputs.u16(FRAME_COUNT),
-                sat < pivot,
-            );
+            if sat < pivot {
+                pair.step_satellite();
+            }
+            let (step, soft_drop_point) = pair.step_pivot(&field, pad(inputs), keys, speed, inputs.u16(FRAME_COUNT));
+            if sat > pivot {
+                pair.step_satellite();
+            }
+            // The player actor (an earlier slot) has already run: the flag is still set.
+            if player < pivot && (cur.u8(player + 7) & 8 != 0) != soft_drop_point {
+                return (checked, Some(format!("{} frame {frame}: soft-drop point: ROM {}, ours {soft_drop_point}", path.display(), cur.u8(player + 7) & 8 != 0)));
+            }
             checked += 1;
             if input_lag == 0 {
                 let before = pair_from(prev, pivot, sat);
