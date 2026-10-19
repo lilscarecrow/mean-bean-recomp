@@ -553,3 +553,234 @@ impl Engine {
         Some(p) // the palette color itself isn't ported
     }
 }
+
+/// `loc_685E` (Frankly's stage, six of them): while the player is crowded (crowding 1),
+/// a sprite that hops between places of a table, pausing between hops.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BgSlide {
+    pub draw: u8,
+    /// +$22 steps left of this hop, +$26 pause before it, +$28 place (byte offset into
+    /// `unk_690A`), +$2A/+$2C step per frame, +$32 pause index (`unk_6902`, 8 long).
+    pub steps: u8,
+    pub pause: u8,
+    pub place: u8,
+    pub dx: u16,
+    pub dy: u16,
+    pub phase: u8,
+    pub x: u16,
+    pub y: u16,
+}
+
+pub const BG_SLIDE_CODE: u32 = 0x685E;
+const BG_SLIDE_PAUSES: u32 = 0x6902;
+const BG_SLIDE_PLACES: u32 = 0x690A;
+
+/// `loc_6AFE` (opponent 14's stage): a sprite that runs back and forth while nobody is
+/// crowded, animates when the CPU is, and throws sparks on cue from the portrait while
+/// the player is.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BgRunner {
+    /// +$2E: the portrait it watches.
+    pub portrait: usize,
+    pub draw: u8,
+    /// +$26 spark latch, +$28 direction, +$2A pause, +$2C crowding last seen.
+    pub latch: u8,
+    pub left: u8,
+    pub pause: u8,
+    pub level: u8,
+    pub x: u16,
+    pub y: u16,
+    /// Its animation; while running, +$22 (the animation's time) counts frames and
+    /// +$09 (its frame) flips between two.
+    pub anim: Anim,
+}
+
+pub const BG_RUNNER_CODE: u32 = 0x6AFE;
+const BG_RUNNER_SCRIPT: u32 = 0x6CAC;
+/// `byte_6D6E`: the three sparks' steps and start x (dx, dy, x); they start at y $E2.
+const BG_SPARK_STEPS: [(u16, u16, u16); 3] = [(0x0002, 0xFFFE, 0x0125), (0x0000, 0xFFFC, 0x011B), (0xFFFE, 0xFFFE, 0x0111)];
+
+/// `loc_6D50`: a spark from `BgRunner`, moving a fixed step for 9 frames.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BgSpark {
+    pub frame: u8,
+    pub left: u8,
+    pub dx: u16,
+    pub dy: u16,
+    pub x: u16,
+    pub y: u16,
+}
+
+pub const BG_SPARK_CODE: u32 = 0x6D50;
+
+/// `ActShakeField` (`PuyoLandEffects`, Frankly's and Dragon Breath's stages): P2's
+/// field shakes when its pair touches down.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ShakeField {
+    /// +$36 angle, +$38 strength, +$32 its vertical scroll entries.
+    pub angle: u8,
+    pub strength: u16,
+    pub scroll: u32,
+}
+
+pub const SHAKE_FIELD_CODE: u32 = 0x397A;
+const OPP_FRANKLY: u8 = 1;
+const OPP_DRAGON: u8 = 10;
+
+impl Engine {
+    pub(super) fn run_bg_slide(&mut self, mut b: BgSlide) -> Option<BgSlide> {
+        if self.portrait_lock & 0xFF00 != 0 {
+            return None;
+        }
+        if self.crowding != 1 {
+            b.draw = 0;
+            b.steps = 0;
+            return Some(b);
+        }
+        if b.steps != 0 {
+            if b.pause != 0 {
+                b.pause -= 1;
+                return Some(b);
+            }
+            b.x = b.x.wrapping_add(b.dx);
+            b.y = b.y.wrapping_add(b.dy);
+            b.steps -= 1;
+            b.draw = 0x80;
+            return Some(b);
+        }
+        let at = BG_SLIDE_PLACES + u32::from(b.place);
+        b.x = rom::word(at);
+        b.y = rom::word(at + 2);
+        b.steps = 0x0A;
+        b.pause = rom::byte(BG_SLIDE_PAUSES + u32::from(b.phase));
+        b.phase = (b.phase + 1) & 7;
+        b.draw = 0;
+        if self.portrait_lock != 0 {
+            b.x = b.x.wrapping_sub(0x58);
+            b.y = b.y.wrapping_sub(0xF8);
+        }
+        Some(b)
+    }
+
+    pub(super) fn run_bg_runner(&mut self, mut r: BgRunner) -> Option<BgRunner> {
+        if self.portrait_lock & 0xFF00 != 0 {
+            return None;
+        }
+        let level = self.crowding as u8;
+        let alt = self.portrait_lock != 0;
+        if level != r.level {
+            r.level = level;
+            match level & 3 {
+                0 => {
+                    r.anim.frame = 0;
+                    (r.latch, r.left, r.pause) = (0, 0, 0);
+                    r.x = 0x102;
+                    r.y = 0xE6;
+                    // (with word_FF1124 set the ROM adjusts the wrong pointer: no effect)
+                }
+                2 => {
+                    r.anim.time = 0;
+                    r.anim.ptr = BG_RUNNER_SCRIPT; // (the frame stays)
+                    r.x = 0x12B;
+                    r.y = 0xFA;
+                }
+                _ => {
+                    if let Some(Actor::Portrait(p)) = self.slots[r.portrait].as_mut() {
+                        p.shown = 0;
+                    }
+                    r.draw = 0;
+                }
+            }
+            return Some(r);
+        }
+        match level & 3 {
+            0 => {
+                if r.pause != 0 {
+                    r.pause -= 1;
+                    r.draw = 0;
+                    return Some(r);
+                }
+                r.draw = 0x80;
+                r.anim.time += 1;
+                if r.anim.time == 3 {
+                    r.anim.frame ^= 1;
+                    r.anim.time = 0;
+                }
+                let (lo, hi): (i16, i16) = if alt { (0xAC, 0xC4) } else { (0x104, 0x11C) };
+                if r.left != 0 {
+                    if (r.x as i16) > lo {
+                        r.x = r.x.wrapping_sub(6);
+                        return Some(r);
+                    }
+                } else if (r.x as i16) <= hi {
+                    r.x = r.x.wrapping_add(6);
+                    return Some(r);
+                }
+                // loc_6C3C: pause, then start again from one end.
+                r.draw = 0;
+                let n = self.random() as u8;
+                r.pause = n & 0x3F;
+                if n & 1 != 0 {
+                    r.x = hi as u16;
+                    r.left = 1;
+                } else {
+                    r.x = lo as u16;
+                    r.left = u8::from(alt);
+                }
+            }
+            1 => {
+                let shown = match &self.slots[r.portrait] {
+                    Some(Actor::Portrait(p)) => p.shown,
+                    _ => 0,
+                };
+                if shown != 2 && shown != 8 {
+                    r.latch = 0;
+                } else if r.latch == 0 {
+                    r.latch = 1;
+                    let mut next = BG_SPARK_STEPS.iter();
+                    for n in (0..3u8).rev() {
+                        let Some(slot) = self.find_actor_slot() else { continue };
+                        let &(dx, dy, x) = next.next().unwrap();
+                        let (mut x, mut y, mut frame) = (x, 0xE2u16, 2 + n);
+                        if alt {
+                            (x, y, frame) = (x.wrapping_sub(0x58), y.wrapping_sub(0xF8), frame + 8);
+                        }
+                        self.slots[slot] = Some(Actor::BgSpark(BgSpark { frame, left: 0x0A, dx, dy, x, y }));
+                    }
+                }
+            }
+            2 => {
+                r.draw = 0x80;
+                r.anim.step_with(&mut || self.random());
+            }
+            _ => {}
+        }
+        Some(r)
+    }
+
+    pub(super) fn run_bg_spark(&mut self, mut s: BgSpark) -> Option<BgSpark> {
+        s.left = s.left.wrapping_sub(1);
+        if s.left == 0 {
+            return None;
+        }
+        s.x = s.x.wrapping_add(s.dx);
+        s.y = s.y.wrapping_add(s.dy);
+        Some(s)
+    }
+
+    /// `PuyoLandEffects`: on two stages, P2's pair touching down shakes its field.
+    pub(super) fn land_effects(&mut self, player_id: u8) {
+        if !matches!(self.opponent, OPP_FRANKLY | OPP_DRAGON) || player_id == 0 {
+            return;
+        }
+        let Some(slot) = self.free_slot() else { return };
+        self.slots[slot] = Some(Actor::ShakeField(ShakeField { angle: 0, strength: 0x400, scroll: 0xFF_05D2 + 0x34 }));
+    }
+
+    pub(super) fn run_shake_field(&mut self, mut s: ShakeField) -> Option<ShakeField> {
+        s.angle = s.angle.wrapping_add(0x28); // the scroll offsets aren't ported
+        let (left, borrow) = s.strength.overflowing_sub(0x20);
+        s.strength = left;
+        (!borrow).then_some(s)
+    }
+}

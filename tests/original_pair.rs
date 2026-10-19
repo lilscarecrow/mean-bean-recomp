@@ -80,13 +80,14 @@ fn run(input_lag: usize) -> (usize, Option<String>) {
             if sat < pivot {
                 pair.step_satellite();
             }
-            let (step, soft_drop_point) = pair.step_pivot(&field, pad(inputs), keys, speed, inputs.u16(FRAME_COUNT));
+            let (step, events) = pair.step_pivot(&field, pad(inputs), keys, speed, inputs.u16(FRAME_COUNT));
             if sat > pivot {
                 pair.step_satellite();
             }
             // The player actor (an earlier slot) has already run: the flag is still set.
-            if player < pivot && (cur.u8(player + 7) & 8 != 0) != soft_drop_point {
-                return (checked, Some(format!("{} frame {frame}: soft-drop point: ROM {}, ours {soft_drop_point}", path.display(), cur.u8(player + 7) & 8 != 0)));
+            if player < pivot && (cur.u8(player + 7) & 8 != 0) != events.soft_drop_point {
+                let rom = cur.u8(player + 7) & 8 != 0;
+                return (checked, Some(format!("{} frame {frame}: soft-drop point: ROM {rom}, ours {}", path.display(), events.soft_drop_point)));
             }
             checked += 1;
             if input_lag == 0 {

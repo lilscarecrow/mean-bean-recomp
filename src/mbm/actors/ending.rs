@@ -454,7 +454,9 @@ impl Engine {
         if let Some(Actor::BouncingBean(b)) = self.slots[bean_slot].as_mut() {
             b.followed = true;
         }
-        let follower = BounceSparkle { bean: bean_slot, x: 0, y: 0, anim: Anim::new(BOUNCE_SPARKLE_SCRIPT) };
+        let mut anim = Anim::new(BOUNCE_SPARKLE_SCRIPT);
+        anim.frame = 0x11;
+        let follower = BounceSparkle { bean: bean_slot, x: 0, y: 0, anim };
         self.slots[slot] = Some(Actor::BounceSparkle(follower));
     }
 

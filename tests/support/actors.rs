@@ -423,6 +423,41 @@ fn load_stage(ram: &Ram, a: u32, code: u32) -> Option<Actor> {
             y: ram.u16(a + 0x0E),
             anim: anim_from(ram, a),
         }),
+        BG_SLIDE_CODE => Actor::BgSlide(BgSlide {
+            draw: ram.u8(a + 6),
+            steps: ram.u8(a + 0x22),
+            pause: ram.u8(a + 0x26),
+            place: ram.u8(a + 0x28),
+            dx: ram.u16(a + 0x2A),
+            dy: ram.u16(a + 0x2C),
+            phase: ram.u8(a + 0x32),
+            x: ram.u16(a + 0x0A),
+            y: ram.u16(a + 0x0E),
+        }),
+        BG_RUNNER_CODE => Actor::BgRunner(BgRunner {
+            portrait: slot_of(ram.u32(a + 0x2E)),
+            draw: ram.u8(a + 6),
+            latch: ram.u8(a + 0x26),
+            left: ram.u8(a + 0x28),
+            pause: ram.u8(a + 0x2A),
+            level: ram.u8(a + 0x2C),
+            x: ram.u16(a + 0x0A),
+            y: ram.u16(a + 0x0E),
+            anim: anim_from(ram, a),
+        }),
+        BG_SPARK_CODE => Actor::BgSpark(BgSpark {
+            frame: ram.u8(a + 9),
+            left: ram.u8(a + 0x28),
+            dx: ram.u16(a + 0x2A),
+            dy: ram.u16(a + 0x2C),
+            x: ram.u16(a + 0x0A),
+            y: ram.u16(a + 0x0E),
+        }),
+        SHAKE_FIELD_CODE => Actor::ShakeField(ShakeField {
+            angle: ram.u8(a + 0x36),
+            strength: ram.u16(a + 0x38),
+            scroll: ram.u32(a + 0x32),
+        }),
         PASSWORD_BEAN_CODE => Actor::PasswordBean(PasswordBean {
             color: ram.u8(a + 8),
             x: ram.u16(a + 0x0A),
@@ -541,6 +576,17 @@ pub fn describe(actor: &Actor) -> String {
             b.state.code(), b.motion.x, b.motion.y, b.motion.vx, b.motion.vy, b.draw, b.color, b.frame, b.angle, b.timer, b.followed
         ),
         Actor::BounceSparkle(sp) => format!("bounce sparkle bean {:X} at {:X},{:X} anim {:?}", sp.bean, sp.x, sp.y, sp.anim),
+        Actor::BgSlide(b) => format!(
+            "bg slide draw {:02X} steps {} pause {} place {} step {:X},{:X} phase {} at {:X},{:X}",
+            b.draw, b.steps, b.pause, b.place, b.dx, b.dy, b.phase, b.x, b.y
+        ),
+        Actor::BgRunner(r) => format!(
+            "bg runner portrait {:X} draw {:02X} latch {} left {} pause {} level {} at {:X},{:X} anim {:?}",
+            r.portrait, r.draw, r.latch, r.left, r.pause, r.level, r.x, r.y,
+            if r.level & 3 == 2 { r.anim } else { Anim { ptr: 0, ..r.anim } }
+        ),
+        Actor::BgSpark(sp) => format!("bg spark frame {} left {} step {:X},{:X} at {:X},{:X}", sp.frame, sp.left, sp.dx, sp.dy, sp.x, sp.y),
+        Actor::ShakeField(sh) => format!("shake field angle {:02X} strength {:X} scroll {:X}", sh.angle, sh.strength, sh.scroll),
         Actor::PasswordBean(b) => format!("password bean color {:02X} at {:X},{:X} anim {:?}", b.color, b.x, b.y, b.anim),
         Actor::PortraitPalette(pt) => format!("portrait palette wait {} step {:04X} level {}", pt.wait, pt.step, pt.level),
         Actor::Glow(g) => format!(

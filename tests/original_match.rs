@@ -80,7 +80,12 @@ fn engine_from(ram: &Ram) -> Result<Engine, String> {
 
 /// Everything the engine models, compared with the ROM's RAM.
 fn mismatch(e: &Engine, ram: &Ram) -> Option<String> {
-    for slot in 0..SLOTS {
+    mismatch_except(e, ram, None)
+}
+
+/// As `mismatch`, leaving out one slot (an actor the snapshot caught halfway through).
+fn mismatch_except(e: &Engine, ram: &Ram, skip: Option<usize>) -> Option<String> {
+    for slot in (0..SLOTS).filter(|&s| Some(s) != skip) {
         let a = slot_addr(slot);
         match &e.slots[slot] {
             None if used(ram, slot) => {
@@ -210,12 +215,14 @@ fn run_match(all: &[Ram], start: usize, poked: &std::collections::HashSet<usize>
             Ok(()) => {}
         }
         if let Some(m) = mismatch(&engine, cur) {
-            // The logic may have overrun the video frame: find where RunActors was cut.
+            // The logic may have overrun the video frame: find where RunActors was cut
+            // (between actors, or in the middle of actor `cut`, which then shows half done).
             let cut = (1..SLOTS).find_map(|cut| {
                 let mut t = before.clone();
                 t.vblank();
                 t.run_slots(0..cut, &inputs).ok()?;
-                mismatch(&t, cur).is_none().then_some((cut, t))
+                let ok = mismatch(&t, cur).is_none() || mismatch_except(&t, cur, Some(cut)).is_none();
+                ok.then_some((cut, t))
             });
             match cut {
                 Some((cut, t)) => {

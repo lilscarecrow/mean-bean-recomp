@@ -107,6 +107,10 @@ pub enum Actor {
     ContinueSign(ContinueSign),
     BouncingBean(BouncingBean),
     BounceSparkle(BounceSparkle),
+    BgSlide(BgSlide),
+    BgRunner(BgRunner),
+    BgSpark(BgSpark),
+    ShakeField(ShakeField),
 }
 
 impl Actor {
@@ -125,6 +129,7 @@ impl Actor {
                 | Actor::StarSpark(_)
                 | Actor::BouncingBean(_)
                 | Actor::BounceSparkle(_)
+                | Actor::ShakeField(_)
         )
     }
 
@@ -162,6 +167,10 @@ impl Actor {
             Actor::ContinueSign(_) => Some(CONTINUE_SIGN_CODE),
             Actor::BouncingBean(b) => Some(b.state.code()),
             Actor::BounceSparkle(_) => Some(BOUNCE_SPARKLE_CODE),
+            Actor::BgSlide(_) => Some(BG_SLIDE_CODE),
+            Actor::BgRunner(_) => Some(BG_RUNNER_CODE),
+            Actor::BgSpark(_) => Some(BG_SPARK_CODE),
+            Actor::ShakeField(_) => Some(SHAKE_FIELD_CODE),
         }
     }
 }
@@ -1111,6 +1120,10 @@ impl Engine {
                 Actor::ContinueSign(c) => self.run_continue_sign(c).map(Actor::ContinueSign),
                 Actor::BouncingBean(b) => self.run_bouncing_bean(b).map(Actor::BouncingBean),
                 Actor::BounceSparkle(sp) => self.run_bounce_sparkle(sp).map(Actor::BounceSparkle),
+                Actor::BgSlide(b) => self.run_bg_slide(b).map(Actor::BgSlide),
+                Actor::BgRunner(r) => self.run_bg_runner(r).map(Actor::BgRunner),
+                Actor::BgSpark(sp) => self.run_bg_spark(sp).map(Actor::BgSpark),
+                Actor::ShakeField(sh) => self.run_shake_field(sh).map(Actor::ShakeField),
             };
             self.slots[slot] = next;
         }
@@ -1842,8 +1855,11 @@ impl Engine {
                 } else {
                     v.pair.step_pivot(&self.fields[id], inputs.pads[id], inputs.keys[id], fall_speed, self.frame_count)
                 };
-                let (step, soft_drop_point) = step;
-                if soft_drop_point {
+                let (step, events) = step;
+                if events.touched_down {
+                    self.land_effects(id as u8);
+                }
+                if events.soft_drop_point {
                     self.player_mut(v.player_slot).flags |= flag::SOFT_DROP_POINT;
                 }
                 v.place();

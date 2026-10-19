@@ -99,6 +99,16 @@ pub struct Pair {
     pub sat_anim: Anim,
 }
 
+/// What else a pivot's frame did, for its player and the stage.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PivotEvents {
+    /// The player earns a soft-drop point (`sub_50DA` sets the player's flag as soon as
+    /// it sees down held on an odd frame, whatever the pair does next).
+    pub soft_drop_point: bool,
+    /// The pair touched down while falling (`PuyoLandEffects`).
+    pub touched_down: bool,
+}
+
 /// What a frame did.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Step {
@@ -153,9 +163,7 @@ impl Pair {
         step
     }
 
-    /// The pivot actor's controlled frame ($4F14): animate, move, rotate, fall. Also
-    /// says whether the player earns a soft-drop point (`sub_50DA` sets the player's
-    /// flag as soon as it sees down held on an odd frame, whatever the pair does next).
+    /// The pivot actor's controlled frame ($4F14): animate, move, rotate, fall.
     pub fn step_pivot(
         &mut self,
         field: &Field,
@@ -163,13 +171,13 @@ impl Pair {
         keys: RotateKeys,
         fall_speed: u16,
         frame_count: u16,
-    ) -> (Step, bool) {
+    ) -> (Step, PivotEvents) {
         self.pivot_anim.step();
         self.slide_or_move(field, &mut pad);
         self.rotate(field, &mut pad, keys);
-        let mut soft_drop_point = false;
-        let step = self.fall(field, &mut pad, fall_speed, frame_count, &mut soft_drop_point);
-        (step, soft_drop_point)
+        let mut events = PivotEvents::default();
+        let step = self.fall(field, &mut pad, fall_speed, frame_count, &mut events);
+        (step, events)
     }
 
     /// The satellite actor's frame ($5482): animate, turn.
@@ -181,7 +189,8 @@ impl Pair {
     /// `PuyoLandEffects` → `sub_5288` / `sub_52AE` when the pair touches down while
     /// still falling: the pivot bounces, a supported satellite squashes. (Assumes normal
     /// bean colors; the special $19/$1A pieces use another script.)
-    fn touch_down(&mut self, resting: u8) {
+    fn touch_down(&mut self, resting: u8, events: &mut PivotEvents) {
+        events.touched_down = true;
         if resting & 1 != 0 {
             self.pivot_anim.ptr = script::BOUNCE;
         }
@@ -248,12 +257,12 @@ impl Pair {
     }
 
     /// `sub_50DA`.
-    fn fall(&mut self, field: &Field, pad: &mut impl PadSource, fall_speed: u16, frame_count: u16, soft_drop_point: &mut bool) -> Step {
+    fn fall(&mut self, field: &Field, pad: &mut impl PadSource, fall_speed: u16, frame_count: u16, events: &mut PivotEvents) -> Step {
         if self.locked {
             return self.finish_lock();
         }
         if fall_speed >= 0x8001 {
-            return self.fall_fast(field, pad, fall_speed);
+            return self.fall_fast(field, pad, fall_speed, events);
         }
         let read = pad.read(self);
         // Quirk: reading the pad (sub_56C0) overwrites the low byte of the register
@@ -261,7 +270,7 @@ impl Pair {
         let mut speed = (fall_speed & 0xFF00) | u16::from(read.repeat);
         if Self::down_only(read) {
             speed = 0x8000;
-            *soft_drop_point = frame_count & 1 != 0;
+            events.soft_drop_point = frame_count & 1 != 0;
         }
         let falling = Step::Falling;
         let (sum, carry) = self.fall.overflowing_add(speed);
@@ -278,7 +287,7 @@ impl Pair {
         self.fall = sum;
         let resting = if crossed_half { self.resting(field) } else { 0 };
         if resting != 0 {
-            self.touch_down(resting);
+            self.touch_down(resting, events);
             self.contacts += 1;
             if self.contacts >= MAX_CONTACTS {
                 return self.lock();
@@ -288,7 +297,7 @@ impl Pair {
     }
 
     /// `loc_5222`: fall rates above $8000 (a cell or more every other frame).
-    fn fall_fast(&mut self, field: &Field, pad: &mut impl PadSource, fall_speed: u16) -> Step {
+    fn fall_fast(&mut self, field: &Field, pad: &mut impl PadSource, fall_speed: u16, events: &mut PivotEvents) -> Step {
         let falling = Step::Falling;
         let before = self.fall;
         let (sum, carry) = self.fall.overflowing_add(fall_speed);
@@ -303,7 +312,7 @@ impl Pair {
             return falling;
         }
         if before != 0xFFFF {
-            self.touch_down(resting);
+            self.touch_down(resting, events);
             self.contacts += 1;
             if self.contacts >= MAX_CONTACTS {
                 return self.lock();
