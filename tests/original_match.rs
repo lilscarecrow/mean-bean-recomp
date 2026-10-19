@@ -51,6 +51,11 @@ fn globals_from(ram: &Ram) -> Engine {
     let mut e = Engine::new();
     for i in 0..2 {
         e.fields[i] = Field::from_words(&ram.field_words(i));
+        let words = ram.field_words(i);
+        for (j, w) in words.iter().enumerate() {
+            e.field_bytes[i].cells[j] = (w >> 8) as u8;
+            e.field_bytes[i].drawn[j] = *w as u8;
+        }
         e.ai_fields[i] = AiField::from_bytes(ram.bytes(AI_FIELD[i], off::SIZE));
         e.cpu_memory[i] = ram.bytes(CPU_MEMORY[i], 10).try_into().unwrap();
         e.cpu_reads[i] = ram.u8(CPU_READS + i as u32);
@@ -112,6 +117,20 @@ fn mismatch_except(e: &Engine, ram: &Ram, skip: Option<usize>) -> Option<String>
         }
     }
     for i in 0..2 {
+        let words = ram.field_words(i);
+        for (j, w) in words.iter().enumerate() {
+            let (cell, drawn) = ((w >> 8) as u8, *w as u8);
+            if (cell, drawn) != (e.field_bytes[i].cells[j], e.field_bytes[i].drawn[j]) {
+                return Some(format!(
+                    "P{} cell bytes at row {} col {}: ROM {cell:02X}/{drawn:02X} ours {:02X}/{:02X}",
+                    i + 1,
+                    j / 6,
+                    j % 6,
+                    e.field_bytes[i].cells[j],
+                    e.field_bytes[i].drawn[j]
+                ));
+            }
+        }
         let rom = Field::from_words(&ram.field_words(i));
         if rom != e.fields[i] {
             return Some(format!("P{} field\n  ROM\n{rom:?}  our\n{:?}", i + 1, e.fields[i]));
@@ -183,7 +202,10 @@ fn ram_says_bytecode_runs(ram: &Ram) -> bool {
 /// Runs one match from `start`. Ok(reason it stopped) or Err(first mismatch).
 fn run_match(all: &[Ram], start: usize, poked: &std::collections::HashSet<usize>, run: &mut Run) -> Result<String, String> {
     match engine_from(&all[start]) {
-        Ok(engine) => run_from(all, start, engine, poked, run),
+        Ok(engine) => run_from(all, start, engine, poked, run, &mut |_, e| {
+            e.plane_writes.clear();
+            Ok(())
+        }),
         Err(e) => Ok(format!("at the start: {e}")),
     }
 }
@@ -195,6 +217,7 @@ fn run_from(
     mut engine: Engine,
     poked: &std::collections::HashSet<usize>,
     run: &mut Run,
+    on_frame: &mut dyn FnMut(usize, &mut Engine) -> Result<(), String>,
 ) -> Result<String, String> {
     let mut finishing: Option<usize> = None;
     for f in start + 1..all.len() {
@@ -213,6 +236,7 @@ fn run_from(
                 return Err(format!("frame {f}, finishing a split frame at slot {cut:X}: {m}"));
             }
             run.frames += 1;
+            on_frame(f, &mut engine)?;
             continue;
         }
         if prev.bytes(0xFF_E000, 0x1000) == cur.bytes(0xFF_E000, 0x1000) {
@@ -222,6 +246,7 @@ fn run_from(
                 return Err(format!("frame {f} (lag frame): {m}"));
             }
             run.lag += 1;
+            on_frame(f, &mut engine)?;
             continue;
         }
         let before = engine.clone();
@@ -252,6 +277,9 @@ fn run_from(
         }
         run.pieces += count_pairs(&engine).saturating_sub(pieces_before);
         run.frames += 1;
+        if finishing.is_none() {
+            on_frame(f, &mut engine)?;
+        }
         if engine.match_over {
             run.finished += 1;
             if ram_says_bytecode_runs(cur) {
@@ -403,7 +431,11 @@ fn matches_start_from_the_settings_alone() {
             if let Some(m) = mismatch(&e, &all[f]) {
                 panic!("{}", fail(f, "loc_6070", m));
             }
-            match run_from(&all, f, e, &poked, &mut run) {
+            let mut drain = |_: usize, e: &mut Engine| {
+                e.plane_writes.clear();
+                Ok(())
+            };
+            match run_from(&all, f, e, &poked, &mut run, &mut drain) {
                 Ok(why) => {
                     let key = why.split_once(": ").map_or(why.as_str(), |(_, k)| k).to_string();
                     *stops.entry(key).or_insert(0) += 1;
@@ -416,4 +448,76 @@ fn matches_start_from_the_settings_alone() {
         "{started} matches started from the settings alone (by opponent: {opponents:?}), {} frames identical ({} played to the end); stopped at: {stops:?}",
         run.frames, run.finished
     );
+}
+
+/// The field in plane A against VDP snapshots taken during the same bot run as
+/// `batch/k0_f3` (`out/vdp/k0_f3_NNNNNN.vdp`): from each match's start the screen is
+/// built from the ROM, the engine's plane writes are applied every frame, and at the
+/// snapshot frames both fields' plane cells must be the ROM's.
+#[test]
+fn field_planes_match_vdp_snapshots() {
+    use bean_machine::mbm::assets::{planes, screen, Rom, RomAssets, Vram};
+    if !support::install_rom() {
+        return;
+    }
+    let rom = Rom(bean_machine::mbm::rom::get().unwrap());
+    let src = RomAssets::new().unwrap();
+    let Some(path) = recordings().into_iter().find(|p| p.ends_with("batch/k0_f3.ramrec") || p.ends_with("batch\\k0_f3.ramrec")) else {
+        return;
+    };
+    let vdp_dir = path.parent().unwrap().parent().unwrap().join("vdp");
+    let snaps: std::collections::BTreeMap<usize, Vec<u8>> = std::fs::read_dir(&vdp_dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| {
+            let name = e.file_name().into_string().ok()?;
+            let frame = name.strip_prefix("k0_f3_")?.strip_suffix(".vdp")?.parse().ok()?;
+            Some((frame, std::fs::read(e.path()).ok()?))
+        })
+        .collect();
+    if snaps.is_empty() {
+        eprintln!("skipping: no VDP snapshots in {}", vdp_dir.display());
+        return;
+    }
+    let all: Vec<Ram> = frames(&path).collect();
+    let poked = support::poked_frames(&path);
+    let (mut run, mut compared) = (Run::default(), 0);
+    let waiting = |r: &Ram| [P1, P2].iter().all(|&t| r.player_actor(t).is_some_and(|a| r.code(a) == PLAYER_WAITING));
+    for start in (0..all.len()).filter(|&f| waiting(&all[f]) && (f == 0 || !waiting(&all[f - 1]))) {
+        let Ok(engine) = engine_from(&all[start]) else { continue };
+        let mut vram: Vram = screen::match_vram(&rom, &src, engine.opponent).unwrap();
+        planes::match_planes(&rom, &mut vram).unwrap();
+        let mut check = |f: usize, e: &mut Engine| -> Result<(), String> {
+            for (at, w) in e.plane_writes.drain(..) {
+                vram.load(at, &w.to_be_bytes());
+            }
+            let Some(snap) = snaps.get(&f) else { return Ok(()) };
+            let want = &snap[8 + 0x10000..8 + 0x20000];
+            for (player, first_col) in [(0, 2usize), (1, 26)] {
+                for row in 2..26 {
+                    for col in first_col..first_col + 12 {
+                        let at = 0xC000 + row * 0x80 + col * 2;
+                        if vram.0[at..at + 2] != want[at..at + 2] {
+                            return Err(format!(
+                                "frame {f}: P{} plane A row {row} col {col}: ROM {:02X}{:02X} ours {:02X}{:02X}",
+                                player + 1,
+                                want[at],
+                                want[at + 1],
+                                vram.0[at],
+                                vram.0[at + 1]
+                            ));
+                        }
+                    }
+                }
+            }
+            compared += 1;
+            Ok(())
+        };
+        if let Err(m) = run_from(&all, start, engine, &poked, &mut run, &mut check) {
+            panic!("{}: {m}", path.display());
+        }
+    }
+    eprintln!("{compared} snapshots: both fields in plane A identical ({} frames run)", run.frames);
+    assert!(compared > 0);
 }

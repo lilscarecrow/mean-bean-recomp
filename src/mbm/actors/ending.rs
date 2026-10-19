@@ -216,6 +216,14 @@ impl Engine {
     /// `sub_7926`: the loser's field falls away; `w26` counts the actors still busy.
     fn wipe_field(&mut self, p: &mut Player) {
         let id = p.id as usize & 1;
+        // The beans lose their sideways links, and the field is redrawn.
+        for i in HIDDEN_ROWS * COLS..ROWS * COLS {
+            let b = &mut self.field_bytes[id].cells[i];
+            if *b != 0 && *b & 0x70 != 0x60 {
+                *b &= 0xF3;
+            }
+        }
+        self.redraw_field(id);
         let me = self.current_slot;
         let mut busy = 0;
         if let Some(slot) = self.find_actor_slot() {
@@ -265,6 +273,8 @@ impl Engine {
             Wipe => {
                 if p.w26 == 0 {
                     self.fields[p.id as usize & 1] = Field::default(); // ResetPuyoField
+                    self.reset_field_bytes(p.id as usize & 1);
+                    self.redraw_field(p.id as usize & 1);
                     p.state = Cleared;
                 }
             }
@@ -365,6 +375,8 @@ impl Engine {
             ContinueCheck => {
                 if p.flags & 2 == 0 {
                     self.fields[p.id as usize & 1] = Field::default(); // ResetPuyoField
+                    self.reset_field_bytes(p.id as usize & 1);
+                    self.redraw_field(p.id as usize & 1);
                     p.flags = 0;
                     p.state = ContinueDone;
                 }

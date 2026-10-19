@@ -19,9 +19,11 @@ use super::motion::{cos, sin, Motion};
 use super::pair::{PadInput, Pair, RotateKeys, Step};
 use super::rng::Rng;
 
+mod draw;
 mod ending;
 mod setup;
 mod stage;
+pub use draw::*;
 pub use ending::*;
 pub use stage::*;
 
@@ -355,8 +357,9 @@ pub struct PopWork {
     pub groups: Vec<Group>,
     /// Popping beans plus the garbage they clear (both blink).
     pub cells: Vec<(usize, usize)>,
-    /// Field as it was before blinking (`pPuyosCopy`).
+    /// Field as it was before blinking (`pPuyosCopy`), and its cell bytes.
     pub backup: Field,
+    pub backup_bytes: [u8; COLS * ROWS],
     /// Beans dropping after the gaps closed (`pUnk6`).
     pub falling: Vec<FallingBean>,
 }
@@ -907,6 +910,10 @@ pub struct Engine {
     pub portrait_lock: u16,
     /// The generation word of each palette line's fade (`pal_fade_data`, $82 apart).
     pub pal_fade_gen: [u16; 4],
+    /// The fields' cell bytes as the drawing sees them, and the plane A tile writes
+    /// (VRAM address, pattern word) made since the caller last took them.
+    pub field_bytes: [FieldBytes; 2],
+    pub plane_writes: Vec<(u16, u16)>,
     /// `difficulty` (the option: 0-3) and `byte_FF0114` (stages the time bonus allows for).
     pub difficulty_option: u8,
     pub bonus_level: u8,
@@ -963,6 +970,8 @@ impl Engine {
             danger_flash: 0,
             portrait_lock: 0,
             pal_fade_gen: [0; 4],
+            field_bytes: [FieldBytes::default(), FieldBytes::default()],
+            plane_writes: vec![],
             difficulty_option: 0,
             bonus_level: 0,
             bytecode_flag: 0,
@@ -1010,19 +1019,28 @@ impl Engine {
     fn run_fall_command(&mut self, player_slot: usize) {
         let p = self.player_mut(player_slot);
         p.flags &= !FALLING_AFTER_POP;
+        let id = p.id as usize & 1;
         let Some(work) = p.pop.as_mut() else { return };
         let mut any = false;
+        let mut steps = vec![];
         work.falling.retain_mut(|b| {
             any = true;
             let drop_steps = b.rows * 2;
             if b.counter >= drop_steps && b.counter - drop_steps + 1 >= b.bounce {
                 return false; // reached the end marker
             }
+            let color = work.backup.get(b.col as i16, b.row as i16).unwrap_or(BeanColor::Garbage);
+            steps.push((*b, color));
             b.counter += 1;
             true
         });
         if any {
             p.flags |= FALLING_AFTER_POP;
+        }
+        // Drawn from the bottom right cell back to the top left, like the game.
+        steps.sort_by_key(|(b, _)| std::cmp::Reverse((b.row, b.col)));
+        for (b, color) in steps {
+            self.draw_fall_step(id, &b, color);
         }
     }
 
@@ -1156,10 +1174,14 @@ impl Engine {
             FindPops => {
                 // sub_5960 also leaves links and group marks, which the CPU reads later.
                 self.ai_fields[p.id as usize].render(&self.fields[p.id as usize], true);
+                self.relink_bytes(p.id as usize & 1);
                 p.w26 = self.fields[p.id as usize].find_pops().len() as u16;
                 p.state = Redraw;
             }
-            Redraw => p.state = Decide,
+            Redraw => {
+                self.redraw_field(p.id as usize & 1); // sub_5782
+                p.state = Decide;
+            }
             Decide => {
                 if p.w26 != 0 {
                     // loc_3EDA: the popping beans and the garbage they clear (sub_58C8).
@@ -1175,7 +1197,8 @@ impl Engine {
                             }
                         }
                     }
-                    p.pop = Some(PopWork { groups, cells, backup: field.clone(), falling: vec![] });
+                    let backup_bytes = self.field_bytes[p.id as usize & 1].cells;
+                    p.pop = Some(PopWork { groups, cells, backup: field.clone(), backup_bytes, falling: vec![] });
                     self.chaining[p.id as usize & 1] = true;
                     p.state = PopScore;
                 } else {
@@ -1189,7 +1212,10 @@ impl Engine {
             }
             PopBackup => {
                 let backup = self.fields[p.id as usize].clone();
-                p.pop.as_mut().unwrap().backup = backup;
+                let backup_bytes = self.field_bytes[p.id as usize & 1].cells;
+                let work = p.pop.as_mut().unwrap();
+                work.backup = backup;
+                work.backup_bytes = backup_bytes;
                 p.delay = 0x18;
                 p.state = Blink;
             }
@@ -1201,6 +1227,8 @@ impl Engine {
                     let shown = if p.delay & 1 == 0 { work.backup.get(c as i16, r as i16) } else { None };
                     field.set(c, r, shown);
                 }
+                let (cells, backup_bytes) = (work.cells.clone(), work.backup_bytes);
+                self.blink_bytes(p.id as usize & 1, &cells, &backup_bytes, p.delay & 1 == 0);
                 if wait(&mut p.delay) {
                     p.state = PopSpawn;
                 }
@@ -1224,6 +1252,7 @@ impl Engine {
                 let id = p.id as usize;
                 let work = p.pop.as_mut().unwrap();
                 work.falling = close_gaps(&mut self.fields[id], &work.backup);
+                self.compact_bytes(id & 1);
                 p.flags |= FALLING_AFTER_POP;
                 p.state = FallWait;
             }
@@ -1991,6 +2020,7 @@ impl Engine {
     fn mark(&mut self, player: usize, col: u16, row: u16, color: BeanColor) {
         if !self.popping[player] {
             self.fields[player].set(col as usize, row as usize, Some(color));
+            self.mark_bytes(player, col as usize, row as usize, color);
         }
     }
 

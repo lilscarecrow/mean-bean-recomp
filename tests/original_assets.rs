@@ -207,7 +207,7 @@ fn palette_lines_are_rom_palettes() {
 /// them (line 3's color 14 aside: the portrait cycles it).
 #[test]
 fn match_screen_matches_vdp_snapshots() {
-    use bean_machine::mbm::assets::{screen, Rom, RomAssets};
+    use bean_machine::mbm::assets::{planes, screen, Rom, RomAssets};
     let Some(dir) = workspace() else {
         eprintln!("skipping: no ../bean-machine-re");
         return;
@@ -229,13 +229,39 @@ fn match_screen_matches_vdp_snapshots() {
         if level_mode != 0 {
             continue;
         }
-        let ours = screen::match_vram(&rom, &src, opponent).unwrap();
+        let mut ours = screen::match_vram(&rom, &src, opponent).unwrap();
+        // The refugee bean's tiles show the background animator's frame (its +$08).
+        let animator = (0..64).map(|i| 0xE000 + i * 0x40).find(|&a| ram[a + 2..a + 6] == [0, 0, 0x3B, 0xCC]);
+        if let Some(a) = animator {
+            planes::refugee_frame(&mut ours, ram[a + 8]);
+        }
+        planes::match_planes(&rom, &mut ours).unwrap();
         for tile in 0..0xB800 / 32 {
-            if (0x32C..0x330).contains(&tile) {
+            if animator.is_none() && (0x32C..0x330).contains(&tile) {
                 continue;
             }
             let r = tile * 32..tile * 32 + 32;
             assert_eq!(&ours.0[r.clone()], &vram[r], "{}: tile ${tile:03X} (opponent {opponent})", path.display());
+        }
+        // Planes A ($C000) and B ($E000) over the visible 40 x 28 cells: the board.
+        for (plane, base) in [("A", 0xC000usize), ("B", 0xE000)] {
+            for row in 0..28 {
+                for col in 0..40 {
+                    // The centre panel isn't ported; the fields depend on what was drawn
+                    // over the match (original_match.rs replays that).
+                    let field = (2..14).contains(&col) || (26..38).contains(&col);
+                    if (2..26).contains(&row) && ((15..25).contains(&col) || (plane == "A" && field)) {
+                        continue;
+                    }
+                    let at = base + row * 0x80 + col * 2;
+                    assert_eq!(
+                        &ours.0[at..at + 2],
+                        &vram[at..at + 2],
+                        "{}: plane {plane} row {row} col {col} (opponent {opponent})",
+                        path.display()
+                    );
+                }
+            }
         }
         let fading = (0..4).any(|i| u16::from_be_bytes([ram[0x0AD6 + i * 0x82], ram[0x0AD7 + i * 0x82]]) != 0);
         if !fading {

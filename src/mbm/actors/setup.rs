@@ -132,6 +132,7 @@ impl Engine {
         // loc_3D44
         self.popping[id] = false;
         self.fields[id] = Field::default(); // ResetPuyoField
+        self.reset_field_bytes(id);
         add_points(p, 0); // sub_9C4A: draws the score
         // sub_3F94 (scenario): ready at once (bit 0 set, then cleared again), at this
         // level's speed step.

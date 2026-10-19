@@ -41,6 +41,7 @@ impl<'a> BitReader<'a> {
 }
 
 pub mod palette;
+pub mod planes;
 pub mod screen;
 pub mod sprites;
 
