@@ -6,6 +6,7 @@
 
 mod support;
 
+use bean_machine::mbm::anim::Anim;
 use bean_machine::mbm::field::Field;
 use bean_machine::mbm::pair::{Pair, PadInput, RotateKeys, Step};
 use support::{frames, recordings, Ram, FRAME_COUNT, P1, P1_CTRL, P1_KEYS, PIVOT_FALLING, PIVOT_LANDING};
@@ -26,7 +27,14 @@ fn pair_from(ram: &Ram, pivot: u32, sat: u32) -> Pair {
         locked: ram.u8(pivot + 7) & 8 != 0,
         sat_angle: ram.u8(sat + 0x36),
         sat_turn: ram.u8(sat + 0x38),
+        pivot_anim: anim_from(ram, pivot),
+        sat_anim: anim_from(ram, sat),
     }
+}
+
+/// aAnim (+$32), aAnimTime (+$22), aFrame (+$09).
+fn anim_from(ram: &Ram, actor: u32) -> Anim {
+    Anim { ptr: ram.u32(actor + 0x32), time: ram.u8(actor + 0x22), frame: ram.u8(actor + 0x09) }
 }
 
 fn pad(ram: &Ram) -> PadInput {

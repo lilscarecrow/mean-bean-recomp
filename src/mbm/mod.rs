@@ -2,8 +2,11 @@
 //!
 //! Each item names the original routine it reproduces. Behavior is checked frame for
 //! frame against the real ROM by `tests/original_*.rs`, using RAM recordings from the
-//! private harness (see `tests/support/ramrec.rs`). No ROM code or data lives here.
+//! private harness (see `tests/support/mod.rs`). No ROM code, graphics or sound live here:
+//! only the small rule tables and animation timings the logic needs, written out by hand.
 
+pub mod actors;
+pub mod anim;
 pub mod bean_order;
 pub mod field;
 pub mod pair;

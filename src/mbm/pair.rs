@@ -4,6 +4,7 @@
 //! `sub_5060` (sideways), `sub_5384` (rotate), `sub_50DA` (fall / lock), plus the
 //! satellite's rotation animation (`sub_5530`). Fields keep the game's 16-bit words.
 
+use super::anim::{script, Anim};
 use super::field::{Field, DIR};
 
 /// Pivot kick when a turn is blocked (`word_542C`), indexed by the new rotation.
@@ -74,6 +75,9 @@ pub struct Pair {
     /// Satellite angle ($36 of the satellite; $40 per quarter turn) and turn step ($38).
     pub sat_angle: u8,
     pub sat_turn: u8,
+    /// Sprite animations; they also time the landing (see `actors`).
+    pub pivot_anim: Anim,
+    pub sat_anim: Anim,
 }
 
 /// What a frame did.
@@ -120,15 +124,39 @@ impl Pair {
         satellite_first: bool,
     ) -> Step {
         if satellite_first {
-            self.animate_satellite();
+            self.step_satellite();
         }
-        self.slide_or_move(field, pad);
-        self.rotate(field, pad, keys);
-        let step = self.fall(field, pad, fall_speed, frame_count);
+        let step = self.step_pivot(field, pad, keys, fall_speed, frame_count);
         if !satellite_first {
-            self.animate_satellite();
+            self.step_satellite();
         }
         step
+    }
+
+    /// The pivot actor's controlled frame ($4F14): animate, move, rotate, fall.
+    pub fn step_pivot(&mut self, field: &Field, pad: PadInput, keys: RotateKeys, fall_speed: u16, frame_count: u16) -> Step {
+        self.pivot_anim.step();
+        self.slide_or_move(field, pad);
+        self.rotate(field, pad, keys);
+        self.fall(field, pad, fall_speed, frame_count)
+    }
+
+    /// The satellite actor's frame ($5482): animate, turn.
+    pub fn step_satellite(&mut self) {
+        self.sat_anim.step();
+        self.animate_satellite();
+    }
+
+    /// `PuyoLandEffects` → `sub_5288` / `sub_52AE` when the pair touches down while
+    /// still falling: the pivot bounces, a supported satellite squashes. (Assumes normal
+    /// bean colors; the special $19/$1A pieces use another script.)
+    fn touch_down(&mut self, resting: u8) {
+        if resting & 1 != 0 {
+            self.pivot_anim.ptr = script::BOUNCE;
+        }
+        if resting & 2 != 0 {
+            self.sat_anim.ptr = script::SQUASH;
+        }
     }
 
     /// `sub_5060`.
@@ -216,7 +244,9 @@ impl Pair {
         }
         let crossed_half = (self.fall ^ sum) & 0x8000 != 0;
         self.fall = sum;
-        if crossed_half && self.resting(field) != 0 {
+        let resting = if crossed_half { self.resting(field) } else { 0 };
+        if resting != 0 {
+            self.touch_down(resting);
             self.contacts += 1;
             if self.contacts >= MAX_CONTACTS {
                 return self.lock();
@@ -234,12 +264,14 @@ impl Pair {
         if !carry {
             return falling;
         }
-        if self.resting(field) == 0 {
+        let resting = self.resting(field);
+        if resting == 0 {
             self.row = self.row.wrapping_add(1);
             self.fall &= !1; // andi.b #$FE,$21(a0)
             return falling;
         }
         if before != 0xFFFF {
+            self.touch_down(resting);
             self.contacts += 1;
             if self.contacts >= MAX_CONTACTS {
                 return self.lock();
