@@ -200,3 +200,58 @@ fn palette_lines_are_rom_palettes() {
     eprintln!("{matched} of {lines} palette lines (0-2) during matches are ROM palettes");
     assert_eq!(matched, lines);
 }
+
+/// The match screen against VDP snapshots from the harness (`out/vdp/*.vdp`: RAM, VRAM,
+/// CRAM, VSRAM): patterns $0000-$B7FF as `screen::match_vram` builds them (the animated
+/// tiles $32C-$32F aside), and the palette lines in RAM as `screen::match_palettes` has
+/// them (line 3's color 14 aside: the portrait cycles it).
+#[test]
+fn match_screen_matches_vdp_snapshots() {
+    use bean_machine::mbm::assets::{screen, Rom, RomAssets};
+    let Some(dir) = workspace() else {
+        eprintln!("skipping: no ../bean-machine-re");
+        return;
+    };
+    if !support::install_rom() {
+        return;
+    }
+    let rom = Rom(bean_machine::mbm::rom::get().unwrap());
+    let src = RomAssets::new().unwrap();
+    let mut snaps: Vec<PathBuf> = std::fs::read_dir(dir.join("out/vdp")).into_iter().flatten().flatten().map(|e| e.path()).collect();
+    snaps.retain(|p| p.extension().is_some_and(|x| x == "vdp"));
+    snaps.sort();
+    let mut checked = 0;
+    for path in snaps {
+        let data = std::fs::read(&path).unwrap();
+        assert_eq!(&data[..8], b"VDPSNAP1", "{}", path.display());
+        let (ram, vram) = (&data[8..8 + 0x10000], &data[8 + 0x10000..8 + 0x20000]);
+        let (level_mode, opponent) = (ram[0x1964], ram[0x0113]);
+        if level_mode != 0 {
+            continue;
+        }
+        let ours = screen::match_vram(&rom, &src, opponent).unwrap();
+        for tile in 0..0xB800 / 32 {
+            if (0x32C..0x330).contains(&tile) {
+                continue;
+            }
+            let r = tile * 32..tile * 32 + 32;
+            assert_eq!(&ours.0[r.clone()], &vram[r], "{}: tile ${tile:03X} (opponent {opponent})", path.display());
+        }
+        let fading = (0..4).any(|i| u16::from_be_bytes([ram[0x0AD6 + i * 0x82], ram[0x0AD7 + i * 0x82]]) != 0);
+        if !fading {
+            let lines = screen::match_palettes(&rom, &src, opponent);
+            for (line, colors) in lines.iter().enumerate() {
+                for (c, &want) in colors.iter().enumerate() {
+                    if line == 3 && c == 14 {
+                        continue;
+                    }
+                    let at = 0x0A56 + line * 32 + c * 2;
+                    let have = u16::from_be_bytes([ram[at], ram[at + 1]]);
+                    assert_eq!(want, have, "{}: palette line {line} color {c}", path.display());
+                }
+            }
+        }
+        checked += 1;
+    }
+    eprintln!("{checked} match-screen snapshots: patterns and palettes identical");
+}
