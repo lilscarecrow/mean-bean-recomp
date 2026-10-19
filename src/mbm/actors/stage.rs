@@ -42,6 +42,8 @@ const PREVIEW_SPECIAL: u32 = 0x4682;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RefereeState {
+    /// $5BCE: just spawned (in versus mode it waits for both players to be ready).
+    Spawned,
     /// $5BF8: the intro animation; on frame $17 (or at its end) the players start.
     Intro,
     /// $5C62: idle animations, chosen at random.
@@ -51,6 +53,7 @@ pub enum RefereeState {
 impl RefereeState {
     pub fn code(self) -> u32 {
         match self {
+            RefereeState::Spawned => 0x5BCE,
             RefereeState::Intro => 0x5BF8,
             RefereeState::Idle => 0x5C62,
         }
@@ -101,6 +104,8 @@ pub const SPARKLE_CODE: u32 = 0x602C;
 /// `sub_3BBA`: a background tile animation (`QueuePlaneCmd $8A`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Animator {
+    /// False at $3BBA (just spawned).
+    pub started: bool,
     pub anim: Anim,
     /// +$08: the frame last sent to the plane.
     pub shown: u8,
@@ -155,6 +160,8 @@ const DANGER_SPARK_FADE: u32 = 0x12516;
 /// (`OpponentMappings`), each shown for a number of frames.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Portrait {
+    /// False at $60F4 (just spawned).
+    pub started: bool,
     /// +$26 crowding level shown ($FFFF at first), +$28 offset into the opponent's list.
     pub level: u16,
     pub base: u16,
@@ -188,6 +195,8 @@ pub const PALETTE_FADE_CODE: u32 = 0x1068;
 /// `loc_6F38`: cycles one palette color of the portrait by crowding level.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PortraitPalette {
+    /// False at $6F38 (just spawned: it waits a frame).
+    pub started: bool,
     pub wait: u8,
     pub step: u16,
     pub level: u8,
@@ -267,6 +276,12 @@ impl Engine {
 
     pub(super) fn run_referee(&mut self, mut r: Referee, inputs: &Inputs) -> Result<Option<Referee>, Unported> {
         match r.state {
+            RefereeState::Spawned => {
+                if self.level_mode == 1 {
+                    return Err(Unported("the referee waiting for versus players (loc_5BCE)"));
+                }
+                r.state = RefereeState::Intro;
+            }
             RefereeState::Intro => {
                 let done = r.anim.step_with(&mut || self.random());
                 if !done {
@@ -383,6 +398,12 @@ impl Engine {
     }
 
     pub(super) fn run_animator(&mut self, mut a: Animator) -> Option<Animator> {
+        if !a.started {
+            a.started = true;
+            a.shown = 0xFF;
+            a.anim.ptr = 0x3BF2; // byte_3BF2
+            return Some(a);
+        }
         a.anim.step_with(&mut || self.random());
         if a.anim.frame != a.shown {
             a.shown = a.anim.frame; // QueuePlaneCmd $8A: drawing isn't ported
@@ -466,6 +487,11 @@ impl Engine {
     }
 
     pub(super) fn run_portrait(&mut self, mut p: Portrait) -> Option<Portrait> {
+        if !p.started {
+            p.started = true;
+            p.level = 0xFFFF;
+            return Some(p);
+        }
         if self.portrait_lock & 0xFF00 != 0 {
             return None;
         }
@@ -524,6 +550,10 @@ impl Engine {
     }
 
     pub(super) fn run_portrait_palette(&mut self, mut p: PortraitPalette) -> Option<PortraitPalette> {
+        if !p.started {
+            p.started = true;
+            return Some(p);
+        }
         if self.portrait_lock & 0xFF00 != 0 {
             return None;
         }

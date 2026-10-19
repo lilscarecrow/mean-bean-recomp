@@ -20,6 +20,7 @@ use super::pair::{PadInput, Pair, RotateKeys, Step};
 use super::rng::Rng;
 
 mod ending;
+mod setup;
 mod stage;
 pub use ending::*;
 pub use stage::*;
@@ -153,11 +154,11 @@ impl Actor {
             Actor::PreviewBean(_) => Some(PREVIEW_BEAN_CODE),
             Actor::Referee(r) => Some(r.state.code()),
             Actor::Sparkle(_) => Some(SPARKLE_CODE),
-            Actor::Animator(_) => Some(ANIMATOR_CODE),
+            Actor::Animator(a) => Some(if a.started { ANIMATOR_CODE } else { 0x3BBA }),
             Actor::Danger(_) => Some(DANGER_CODE),
             Actor::DangerSpark(s) => Some(s.state.code()),
-            Actor::Portrait(_) => Some(PORTRAIT_CODE),
-            Actor::PortraitPalette(_) => Some(PORTRAIT_PALETTE_CODE),
+            Actor::Portrait(p) => Some(if p.started { PORTRAIT_CODE } else { 0x60F4 }),
+            Actor::PortraitPalette(p) => Some(if p.started { PORTRAIT_PALETTE_CODE } else { 0x6F38 }),
             Actor::PaletteFade(_) => Some(PALETTE_FADE_CODE),
             Actor::Star(s) => Some(s.state.code()),
             Actor::StarSpark(_) => Some(STAR_SPARK_CODE),
@@ -181,6 +182,10 @@ impl Actor {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PlayerState {
+    /// $3D1C: just spawned (`loc_3C00`): set up the pair holder and the field.
+    Setup,
+    /// $3D80: until flag bit 0 clears, then take the fall rate for the speed step.
+    WaitReady,
     /// $3DA0: before the match starts, until the referee clears flag bit 1.
     WaitStart,
     /// $3E6E: pair in play; count frames, wait for both beans to be written.
@@ -253,6 +258,8 @@ pub enum PlayerState {
 impl PlayerState {
     pub fn code(self) -> u32 {
         match self {
+            PlayerState::Setup => 0x3D1C,
+            PlayerState::WaitReady => 0x3D80,
             PlayerState::WaitStart => 0x3DA0,
             PlayerState::WaitPair => 0x3E6E,
             PlayerState::FindPops => 0x3E9A,
@@ -1238,6 +1245,8 @@ impl Engine {
                     p.state = AfterDelay;
                 }
             }
+            Setup => self.set_up_player(&mut p)?,
+            WaitReady => self.player_ready(&mut p)?,
             WaitStart => {
                 if p.flags & 2 == 0 {
                     // loc_3DAC: sub_3CFA

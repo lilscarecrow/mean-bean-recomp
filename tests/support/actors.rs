@@ -100,6 +100,8 @@ pub fn load(ram: &Ram, slot: usize, tag: u8) -> Option<Actor> {
         return Some(actor);
     }
     let player_state = [
+        PlayerState::Setup,
+        PlayerState::WaitReady,
         PlayerState::WaitStart,
         PlayerState::WaitPair,
         PlayerState::FindPops,
@@ -328,10 +330,9 @@ fn load_stage(ram: &Ram, a: u32, code: u32) -> Option<Actor> {
             draw: ram.u8(a + 6),
             anim: anim_from(ram, a),
         }),
-        0x5BF8 | 0x5C62 => {
-            let intro = code == 0x5BF8;
+        0x5BCE | 0x5BF8 | 0x5C62 => {
             Actor::Referee(Referee {
-                state: if intro { RefereeState::Intro } else { RefereeState::Idle },
+                state: [RefereeState::Spawned, RefereeState::Intro, RefereeState::Idle].into_iter().find(|s| s.code() == code).unwrap(),
                 link: ram.u32(a + 0x2E),
                 anim: anim_from(ram, a),
                 draw: ram.u8(a + 6),
@@ -346,7 +347,7 @@ fn load_stage(ram: &Ram, a: u32, code: u32) -> Option<Actor> {
             })
         }
         SPARKLE_CODE => Actor::Sparkle(Sparkle { motion: motion_at(ram, a), draw: ram.u8(a + 6), timer: ram.u16(a + 0x26) }),
-        ANIMATOR_CODE => Actor::Animator(Animator { anim: anim_from(ram, a), shown: ram.u8(a + 8) }),
+        ANIMATOR_CODE | 0x3BBA => Actor::Animator(Animator { started: code == ANIMATOR_CODE, anim: anim_from(ram, a), shown: ram.u8(a + 8) }),
         DANGER_CODE => Actor::Danger(Danger {
             spark_wait: ram.u16(a + 0x26),
             flash_wait: ram.u16(a + 0x28),
@@ -358,7 +359,8 @@ fn load_stage(ram: &Ram, a: u32, code: u32) -> Option<Actor> {
             draw: ram.u8(a + 6),
             anim: anim_from(ram, a),
         }),
-        PORTRAIT_CODE => Actor::Portrait(Portrait {
+        PORTRAIT_CODE | 0x60F4 => Actor::Portrait(Portrait {
+            started: code == PORTRAIT_CODE,
             level: ram.u16(a + 0x26),
             base: ram.u16(a + 0x28),
             wait: ram.u8(a + 0x22),
@@ -478,7 +480,8 @@ fn load_stage(ram: &Ram, a: u32, code: u32) -> Option<Actor> {
             y: ram.u16(a + 0x0E),
             anim: anim_from(ram, a),
         }),
-        PORTRAIT_PALETTE_CODE => Actor::PortraitPalette(PortraitPalette {
+        PORTRAIT_PALETTE_CODE | 0x6F38 => Actor::PortraitPalette(PortraitPalette {
+            started: code == PORTRAIT_PALETTE_CODE,
             wait: ram.u8(a + 0x22),
             step: ram.u16(a + 0x26),
             level: ram.u8(a + 0x2A),

@@ -33,6 +33,21 @@ const PAL_FADE: u32 = 0xFF_0AD6;
 
 /// The engine as the ROM's RAM has it at `ram` (both players waiting to start).
 fn engine_from(ram: &Ram) -> Result<Engine, String> {
+    let mut e = globals_from(ram);
+    for slot in 0..SLOTS {
+        if !used(ram, slot) {
+            continue;
+        }
+        let a = slot_addr(slot);
+        let actor = load(ram, slot, ram.u8(a)).ok_or_else(|| format!("slot {slot:X}: actor ${:X} isn't ported", ram.code(a)))?;
+        e.slots[slot] = Some(actor);
+    }
+    Ok(e)
+}
+
+/// Everything but the actors: what the game flow leaves for a match (settings, the
+/// score so far, tables kept between matches, the random seed, the clocks).
+fn globals_from(ram: &Ram) -> Engine {
     let mut e = Engine::new();
     for i in 0..2 {
         e.fields[i] = Field::from_words(&ram.field_words(i));
@@ -67,15 +82,7 @@ fn engine_from(ram: &Ram) -> Result<Engine, String> {
     e.icon_gen = [ram.u8(ICON_GEN), ram.u8(ICON_GEN + 1)];
     e.chaining = [ram.u8(CHAINING) != 0, ram.u8(CHAINING + 1) != 0];
     e.rng = Rng::new(ram.u32(RNG_SEED));
-    for slot in 0..SLOTS {
-        if !used(ram, slot) {
-            continue;
-        }
-        let a = slot_addr(slot);
-        let actor = load(ram, slot, ram.u8(a)).ok_or_else(|| format!("slot {slot:X}: actor ${:X} isn't ported", ram.code(a)))?;
-        e.slots[slot] = Some(actor);
-    }
-    Ok(e)
+    e
 }
 
 /// Everything the engine models, compared with the ROM's RAM.
@@ -175,10 +182,20 @@ fn ram_says_bytecode_runs(ram: &Ram) -> bool {
 
 /// Runs one match from `start`. Ok(reason it stopped) or Err(first mismatch).
 fn run_match(all: &[Ram], start: usize, poked: &std::collections::HashSet<usize>, run: &mut Run) -> Result<String, String> {
-    let mut engine = match engine_from(&all[start]) {
-        Ok(e) => e,
-        Err(e) => return Ok(format!("at the start: {e}")),
-    };
+    match engine_from(&all[start]) {
+        Ok(engine) => run_from(all, start, engine, poked, run),
+        Err(e) => Ok(format!("at the start: {e}")),
+    }
+}
+
+/// Runs `engine` (as of frame `start`) on to the end of the match.
+fn run_from(
+    all: &[Ram],
+    start: usize,
+    mut engine: Engine,
+    poked: &std::collections::HashSet<usize>,
+    run: &mut Run,
+) -> Result<String, String> {
     let mut finishing: Option<usize> = None;
     for f in start + 1..all.len() {
         if poked.contains(&f) {
@@ -284,7 +301,11 @@ fn whole_matches_run_on_the_engine_alone() {
             // when everything in it is ported.
             let mid_match = f == 0
                 && !waiting(&all[0])
-                && engine_from(&all[0]).is_ok_and(|e| e.slots.iter().any(|s| matches!(s, Some(Actor::Player(_)))));
+                && engine_from(&all[0]).is_ok_and(|e| {
+                    // (a match still being set up is the other test's business)
+                    let players = || e.slots.iter().filter_map(|s| if let Some(Actor::Player(p)) = s { Some(p) } else { None });
+                    players().count() > 0 && players().all(|p| !matches!(p.state, PlayerState::Setup | PlayerState::WaitReady))
+                });
             if !mid_match && (!waiting(&all[f]) || (f > 0 && waiting(&all[f - 1])) || poked.contains(&f)) {
                 continue;
             }
@@ -302,5 +323,97 @@ fn whole_matches_run_on_the_engine_alone() {
     eprintln!(
         "{matches} matches ({} played to the end), {} frames identical ({} lag, {} split), {} pairs dealt; stopped at: {stops:?}",
         run.finished, run.frames, run.lag, run.split, run.pieces
+    );
+}
+
+/// The frames where the game flow starts a match: P1's player actor appears ($3D80 at
+/// the end of its first frame), none in the frame before.
+fn match_setups(all: &[Ram]) -> Vec<usize> {
+    let p1_at = |r: &Ram, code: u32| r.actors().any(|a| r.u8(a) == P1 && r.code(a) == code);
+    let any_p1 = |r: &Ram| r.actors().any(|a| r.u8(a) == P1);
+    (1..all.len()).filter(|&f| p1_at(&all[f], 0x3D80) && !any_p1(&all[f - 1])).collect()
+}
+
+/// Matches built from nothing: the game flow's settings and seed from before
+/// `GenPuyoOrder`, no actors at all. The engine deals the bean orders, starts the match
+/// and the stage on the frames the bytecode does, then runs it to the end.
+#[test]
+fn matches_start_from_the_settings_alone() {
+    if !support::install_rom() {
+        return;
+    }
+    let mut run = Run::default();
+    let (mut started, mut stops) = (0, std::collections::BTreeMap::<String, usize>::new());
+    let mut opponents = std::collections::BTreeMap::<u8, usize>::new();
+    for path in recordings() {
+        let poked = support::poked_frames(&path);
+        let all: Vec<Ram> = frames(&path).collect();
+        for s in match_setups(&all) {
+            let orders = |r: &Ram| [r.bytes(BEAN_ORDERS[0], 256).to_vec(), r.bytes(BEAN_ORDERS[1], 256).to_vec()];
+            // GenPuyoOrder's frame: the last change of the bean orders before the setup.
+            let Some(g) = (s.saturating_sub(8)..s).rev().find(|&f| f > 0 && orders(&all[f]) != orders(&all[f - 1])) else {
+                *stops.entry("no GenPuyoOrder found".into()).or_insert(0) += 1;
+                continue;
+            };
+            if (g - 1..=s).any(|f| poked.contains(&f)) || all[g - 1].actors().any(|a| used(&all[g - 1], slot_of(a))) {
+                continue;
+            }
+            started += 1;
+            *opponents.entry(all[g - 1].u8(0xFF_0113)).or_insert(0) += 1;
+            let mut e = globals_from(&all[g - 1]);
+            let fail = |f: usize, what: &str, m: String| -> String { format!("{} frame {f} ({what}): {m}", path.display()) };
+            // GenPuyoOrder, then the frames up to the setup.
+            e.vblank();
+            e.deal_bean_orders();
+            if let Some(m) = mismatch(&e, &all[g]) {
+                panic!("{}", fail(g, "bean orders", m));
+            }
+            for f in g + 1..s {
+                e.vblank();
+                if let Some(m) = mismatch(&e, &all[f]) {
+                    panic!("{}", fail(f, "before the setup", m));
+                }
+            }
+            // loc_3C00 and the new actors' first frame.
+            e.vblank();
+            if let Err(Unported(what)) = e.start_match().and_then(|_| e.run_slots(0..SLOTS, &inputs_for(&all[s]))) {
+                *stops.entry(what.to_string()).or_insert(0) += 1;
+                continue;
+            }
+            if let Some(m) = mismatch(&e, &all[s]) {
+                panic!("{}", fail(s, "loc_3C00", m));
+            }
+            // A vertical blank, then the portrait art decompresses with interrupts off.
+            e.vblank();
+            if let Some(m) = mismatch(&e, &all[s + 1]) {
+                panic!("{}", fail(s + 1, "before loc_6070", m));
+            }
+            let mut f = s + 2;
+            // (no vertical blank, no actors: the frame counter and the actor table stand still)
+            let still = |a: &Ram, b: &Ram| a.u16(FRAME_COUNT) == b.u16(FRAME_COUNT) && a.bytes(0xFF_E000, 0x1000) == b.bytes(0xFF_E000, 0x1000);
+            while f < all.len() && still(&all[f], &all[f - 1]) {
+                f += 1;
+            }
+            // loc_6070: the portrait and the stage's actors, then a frame of actors.
+            e.vblank();
+            if let Err(Unported(what)) = e.start_stage().and_then(|_| e.run_slots(0..SLOTS, &inputs_for(&all[f]))) {
+                *stops.entry(what.to_string()).or_insert(0) += 1;
+                continue;
+            }
+            if let Some(m) = mismatch(&e, &all[f]) {
+                panic!("{}", fail(f, "loc_6070", m));
+            }
+            match run_from(&all, f, e, &poked, &mut run) {
+                Ok(why) => {
+                    let key = why.split_once(": ").map_or(why.as_str(), |(_, k)| k).to_string();
+                    *stops.entry(key).or_insert(0) += 1;
+                }
+                Err(m) => panic!("{}: {m}", path.display()),
+            }
+        }
+    }
+    eprintln!(
+        "{started} matches started from the settings alone (by opponent: {opponents:?}), {} frames identical ({} played to the end); stopped at: {stops:?}",
+        run.frames, run.finished
     );
 }
