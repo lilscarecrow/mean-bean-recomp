@@ -12,9 +12,11 @@ pub mod anim;
 pub mod assets;
 pub mod bean_order;
 pub mod field;
+pub mod game;
 pub mod motion;
 pub mod pad;
 pub mod pair;
+pub mod render;
 pub mod rng;
 pub mod rom;
 

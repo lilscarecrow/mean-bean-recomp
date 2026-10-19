@@ -281,3 +281,58 @@ fn match_screen_matches_vdp_snapshots() {
     }
     eprintln!("{checked} match-screen snapshots: patterns and palettes identical");
 }
+
+/// The software VDP against the emulator's own screenshots: each snapshot's VRAM,
+/// CRAM, VSRAM and registers rendered by `mbm::render` must give the screenshot's
+/// pixels. The emulator's 8-bit values per intensity level are learned from the frame
+/// itself; every pixel must then agree with them.
+#[test]
+fn renderer_matches_emulator_screenshots() {
+    use bean_machine::mbm::render::{self, Layout};
+    let Some(dir) = workspace() else {
+        eprintln!("skipping: no ../bean-machine-re");
+        return;
+    };
+    let mut checked = 0;
+    for frame in ["000100", "003900", "007400"] {
+        let (Ok(snap), Ok(shot)) = (
+            std::fs::read(dir.join(format!("out/vdp/k0_f3_{frame}.vdp"))),
+            std::fs::read(dir.join(format!("out/vdp/k0_f3_{frame}.rgb"))),
+        ) else {
+            continue;
+        };
+        let ram = &snap[8..8 + 0x10000];
+        let vram = &snap[8 + 0x10000..8 + 0x20000];
+        let cram_raw = &snap[8 + 0x20000..8 + 0x20080];
+        let vsram_raw = &snap[8 + 0x20080..8 + 0x20100];
+        // This core keeps CRAM packed as bbbgggrrr; the VDP format is ----bbb-ggg-rrr-.
+        let cram: [u16; 64] = std::array::from_fn(|i| {
+            let v = u16::from_be_bytes([cram_raw[i * 2], cram_raw[i * 2 + 1]]);
+            ((v >> 6) & 7) << 9 | ((v >> 3) & 7) << 5 | (v & 7) << 1
+        });
+        let vsram: Vec<u16> = (0..40).map(|i| u16::from_be_bytes([vsram_raw[i * 2], vsram_raw[i * 2 + 1]])).collect();
+        let layout = Layout::from_registers(&ram[0x0A22..0x0A22 + 24]);
+        let pixels = render::render(&layout, vram, &cram, &vsram);
+        // Learn level -> value from the majority, then count disagreements.
+        let mut votes = vec![std::collections::HashMap::<u8, usize>::new(); 15 * 3];
+        for (i, p) in pixels.iter().enumerate() {
+            for (ch, level) in render::levels(*p).into_iter().enumerate() {
+                *votes[usize::from(level) * 3 + ch].entry(shot[i * 3 + ch]).or_insert(0) += 1;
+            }
+        }
+        let table: Vec<Option<u8>> = votes.iter().map(|v| v.iter().max_by_key(|(_, n)| **n).map(|(k, _)| *k)).collect();
+        if std::env::var_os("MBM_LEVELS").is_some() {
+            eprintln!("{frame} levels (r, g, b): {:?}", table.chunks(3).collect::<Vec<_>>());
+        }
+        let mut wrong = vec![];
+        for (i, p) in pixels.iter().enumerate() {
+            let ours: Vec<u8> = render::levels(*p).into_iter().enumerate().map(|(ch, l)| table[usize::from(l) * 3 + ch].unwrap()).collect();
+            if ours[..] != shot[i * 3..i * 3 + 3] {
+                wrong.push((i % 320, i / 320, *p, shot[i * 3..i * 3 + 3].to_vec()));
+            }
+        }
+        assert!(wrong.is_empty(), "frame {frame}: {} pixels differ, first {:?}", wrong.len(), &wrong[..wrong.len().min(5)]);
+        checked += 1;
+    }
+    eprintln!("{checked} frames rendered pixel-identical to the emulator");
+}
