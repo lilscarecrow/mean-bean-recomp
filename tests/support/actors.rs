@@ -29,8 +29,9 @@ pub fn slot_at(addr: u32) -> Option<usize> {
     (ACTORS..ACTORS + 64 * 0x40).contains(&addr).then(|| slot_of(addr))
 }
 
+/// (24-bit addresses: some pointers were stored sign-extended from a word)
 pub fn slot_of(addr: u32) -> usize {
-    ((addr - ACTORS) / 0x40) as usize
+    (((addr & 0xFF_FFFF) - ACTORS) / 0x40) as usize
 }
 
 /// A slot is taken when its first word is nonzero (`FindActorSlotQuick`'s test; only
@@ -648,6 +649,125 @@ fn load_stage(ram: &Ram, a: u32, code: u32) -> Option<Actor> {
             explosion: code == 0xCCCA || code == 0xCCDE,
         }),
         SKIP_CODE => Actor::Skip,
+        c if SegaLogo::phase_of(c).is_some() => Actor::SegaLogo(SegaLogo {
+            phase: SegaLogo::phase_of(c).unwrap(),
+            delay: ram.u16(a + 0x24),
+            anim: anim_from(ram, a),
+            x: ram.u16(a + 0x0A),
+            color: ram.u16(a + 0x26),
+            tick: ram.u16(a + 0x28),
+        }),
+        CTRL_SKIP_CODE => Actor::CtrlSkip(CtrlSkip { timer: ram.u16(a + 0x26) }),
+        TITLE_HANDLER_CODE => Actor::TitleHandler,
+        c if TitleFade::phase_of(c).is_some() => Actor::TitleFade(TitleFade { phase: TitleFade::phase_of(c).unwrap(), delay: ram.u16(a + 0x24) }),
+        TITLE_ROBOTNIK_CODE => Actor::TitleRobotnik(TitleRobotnik { wait: ram.u8(a + 0x26), step: ram.u16(a + 0x28) }),
+        c if MachineText::phase_of(c).is_some() => Actor::MachineText(MachineText {
+            phase: MachineText::phase_of(c).unwrap(),
+            parent: slot_of(ram.u32(a + 0x2E)),
+            draw: ram.u8(a + 6),
+            anim: anim_from(ram, a),
+            x: ram.u16(a + 0x0A),
+            y: ram.u16(a + 0x0E),
+            delay: ram.u16(a + 0x24),
+            f26: ram.u8(a + 0x26),
+            f28: ram.u16(a + 0x28),
+            beans: ram.u16(a + 0x2A),
+            stage: ram.u8(a + 0x2C),
+        }),
+        c if TitlePiece::from_code(c).is_some() => {
+            let (kind, phase) = TitlePiece::from_code(c).unwrap();
+            Actor::TitlePiece(TitlePiece {
+                kind,
+                phase,
+                parent: slot_of(ram.u32(a + 0x2E)),
+                draw: ram.u8(a + 6),
+                anim: anim_from(ram, a),
+                x: ram.u16(a + 0x0A),
+                y: ram.u16(a + 0x0E),
+                delay: ram.u16(a + 0x24),
+                f26: ram.u16(a + 0x26),
+                f28: ram.u16(a + 0x28),
+                f2a: if c == 0xE888 { 1 } else if c == 0xE880 { 0 } else { ram.u8(a + 0x2A) },
+            })
+        }
+        TITLE_PARTICLE_CODE => Actor::TitleParticle(TitleParticle {
+            draw: ram.u8(a + 6),
+            motion: motion_at(ram, a),
+            anim: anim_from(ram, a),
+            life: ram.u16(a + 0x26),
+        }),
+        0xE27E | 0xE28A | 0xE678 | 0xE698 | 0xE244 | 0xE25E => Actor::TitleBean(TitleBean {
+            from_machine: !matches!(code, 0xE27E | 0xE28A),
+            phase: match code {
+                0xE27E | 0xE678 => 0,
+                0xE28A | 0xE698 => 1,
+                0xE244 => 2,
+                _ => 3,
+            },
+            index: ram.u16(a + 0x26),
+            hop: ram.u16(a + 0x2A),
+            draw: ram.u8(a + 6),
+            motion: motion_at(ram, a),
+            anim: anim_from(ram, a),
+            target: if matches!(code, 0xE27E | 0xE28A) { 0 } else { ram.u16(a + 0x28) },
+        }),
+        ROBOTNIK_TEXT_CODE => Actor::RobotnikText { y: ram.u16(a + 0x0E) },
+        TRADEMARK_CODE => Actor::Trademark,
+        c if MainMenu::phase_of(c).is_some() => Actor::MainMenu(MainMenu {
+            phase: MainMenu::phase_of(c).unwrap(),
+            line: ram.u16(a + 0x26),
+            count: ram.u16(a + 0x28),
+            draw: ram.u8(a + 6),
+            anim: anim_from(ram, a),
+            x: ram.u16(a + 0x0A),
+            y: ram.u16(a + 0x0E),
+        }),
+        0x23014 | 0x23022 | 0x23430 => Actor::Options(Options {
+            phase: match code {
+                0x23014 => 0,
+                0x23022 => 1,
+                _ => 2,
+            },
+            blink: ram.u8(a + 0x26),
+            cursors: [ram.u8(a + 0x2C), ram.u8(a + 0x2D)],
+        }),
+        0xD192 | 0xD19E | 0xD33C | 0xD342 => Actor::PasswordEntry(PasswordEntry {
+            phase: match code {
+                0xD192 => 0,
+                0xD19E => 1,
+                0xD33C => 2,
+                _ => 3,
+            },
+            cursor: ram.u16(a + 0x26),
+            slot: ram.u16(a + 0x2A),
+            password: ram.u16(a + 0x2C),
+            delay: ram.u16(a + 0x24),
+            x: ram.u16(a + 0x0A),
+        }),
+        0xD00C | 0xD0DE | 0xD13A | 0xD348 => Actor::PasswordSprite(PasswordSprite {
+            kind: match code {
+                0xD00C => PasswordKind::Bean,
+                0xD0DE => PasswordKind::Marker,
+                0xD13A => PasswordKind::Digit,
+                _ => PasswordKind::LevelName,
+            },
+            parent: if code == 0xD348 { 0 } else { slot_of(ram.u32(a + 0x2E)) },
+            index: if matches!(code, 0xD0DE | 0xD13A) { ram.u16(a + 0x26) } else { 0 },
+            draw: ram.u8(a + 6),
+            mappings: ram.u8(a + 8),
+            anim: anim_from(ram, a),
+            still: if code == 0xD00C { ram.u8(a + 0x28) } else { 0 },
+            x: ram.u16(a + 0x0A),
+            y: ram.u16(a + 0x0E),
+        }),
+        0xD3B4 | PASSWORD_COLORS_CODE => Actor::PasswordColors(PasswordColors {
+            started: code == PASSWORD_COLORS_CODE,
+            tick_a: ram.u8(a + 0x28),
+            step_a: ram.u8(a + 0x29),
+            tick_b: ram.u8(a + 0x2A),
+            step_b: ram.u8(a + 0x2B),
+        }),
+        MENU_CLOUDS_CODE => Actor::MenuClouds(MenuClouds { count: ram.u16(a + 0x26) }),
         0xC28A | 0xC2B0 | 0xC2C4 | 0xC38C | 0xC3C8 | 0xC3CE => Actor::TableNameEntry(TableNameEntry {
             phase: match code {
                 0xC28A => NamePhase::Start,
@@ -1000,6 +1120,23 @@ pub fn describe(actor: &Actor) -> String {
         Actor::DefeatPiece(p) => format!("{p:X?}"),
         Actor::DefeatPart(p) => format!("{p:X?}"),
         Actor::Skip => "skip".into(),
+        Actor::SegaLogo(l) => format!("{l:X?}"),
+        Actor::CtrlSkip(c) => format!("{c:X?}"),
+        Actor::TitleHandler => "title handler".into(),
+        Actor::TitleFade(t) => format!("{t:X?}"),
+        Actor::TitleRobotnik(r) => format!("{r:X?}"),
+        Actor::MachineText(m) => format!("{m:X?}"),
+        Actor::TitlePiece(p) => format!("{p:X?}"),
+        Actor::TitleParticle(p) => format!("{p:X?}"),
+        Actor::TitleBean(b) => format!("{b:X?}"),
+        Actor::RobotnikText { y } => format!("robotnik text y {y:X}"),
+        Actor::Trademark => "trademark".into(),
+        Actor::MainMenu(m) => format!("{m:X?}"),
+        Actor::MenuClouds(c) => format!("{c:X?}"),
+        Actor::Options(o) => format!("{o:X?}"),
+        Actor::PasswordEntry(p) => format!("{p:X?}"),
+        Actor::PasswordSprite(s) => format!("{s:X?}"),
+        Actor::PasswordColors(c) => format!("{c:X?}"),
         Actor::TableNameEntry(n) => format!("{n:X?}"),
         Actor::TableCursor(c) => format!("{c:X?}"),
         Actor::FireworkColors(c) => format!("{c:X?}"),

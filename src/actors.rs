@@ -30,12 +30,16 @@ mod game_over;
 mod high_scores;
 mod intro;
 mod lair;
+mod menu;
 mod opponent;
+mod options;
 mod palette;
 mod panel;
+mod password;
 mod setup;
 mod sprite;
 mod stage;
+mod title;
 pub use draw::*;
 pub use credits::*;
 pub use ending::*;
@@ -46,11 +50,15 @@ pub use game_over::*;
 pub use high_scores::*;
 pub use intro::*;
 pub use lair::*;
+pub use menu::*;
 pub use opponent::*;
+pub use options::*;
 pub use palette::*;
 pub use panel::*;
+pub use password::*;
 pub use sprite::*;
 pub use stage::*;
+pub use title::*;
 
 pub const SLOTS: usize = 64;
 /// Screen x of each field's left edge (`word_5B34`).
@@ -187,6 +195,26 @@ pub enum Actor {
     CreditLine(CreditLine),
     TableNameEntry(TableNameEntry),
     TableCursor(TableCursor),
+    SegaLogo(SegaLogo),
+    CtrlSkip(CtrlSkip),
+    /// `ActTitleHandler`.
+    TitleHandler,
+    TitleFade(TitleFade),
+    TitleRobotnik(TitleRobotnik),
+    MachineText(MachineText),
+    TitlePiece(TitlePiece),
+    TitleParticle(TitleParticle),
+    TitleBean(TitleBean),
+    /// `ActTitleRobotnikText` (its y follows the machine's shake).
+    RobotnikText { y: u16 },
+    /// The title's trademark sign.
+    Trademark,
+    MainMenu(MainMenu),
+    MenuClouds(MenuClouds),
+    Options(Options),
+    PasswordEntry(PasswordEntry),
+    PasswordSprite(PasswordSprite),
+    PasswordColors(PasswordColors),
 }
 
 impl Actor {
@@ -301,6 +329,23 @@ impl Actor {
             Actor::CreditLine(l) => Some(if l.stopped { 0xB646 } else { 0xB60E }),
             Actor::TableNameEntry(n) => Some(n.phase.code()),
             Actor::TableCursor(_) => Some(TABLE_CURSOR_CODE),
+            Actor::SegaLogo(l) => Some(l.code()),
+            Actor::CtrlSkip(_) => Some(CTRL_SKIP_CODE),
+            Actor::TitleHandler => Some(TITLE_HANDLER_CODE),
+            Actor::TitleFade(t) => Some(t.code()),
+            Actor::TitleRobotnik(_) => Some(TITLE_ROBOTNIK_CODE),
+            Actor::MachineText(m) => Some(m.code()),
+            Actor::TitlePiece(p) => Some(p.code()),
+            Actor::TitleParticle(_) => Some(TITLE_PARTICLE_CODE),
+            Actor::TitleBean(b) => Some(b.code()),
+            Actor::RobotnikText { .. } => Some(ROBOTNIK_TEXT_CODE),
+            Actor::Trademark => Some(TRADEMARK_CODE),
+            Actor::MainMenu(m) => Some(m.code()),
+            Actor::MenuClouds(_) => Some(MENU_CLOUDS_CODE),
+            Actor::Options(o) => Some(o.code()),
+            Actor::PasswordEntry(p) => Some(p.code()),
+            Actor::PasswordSprite(s) => Some(s.kind.code()),
+            Actor::PasswordColors(c) => Some(if c.started { PASSWORD_COLORS_CODE } else { 0xD3B4 }),
             Actor::FfuzzyPalette(p) => Some(if p.started { FFUZZY_PALETTE_CODE } else { 0x6E46 }),
             Actor::PaletteFade(_) => Some(PALETTE_FADE_CODE),
             Actor::Star(s) => Some(s.state.code()),
@@ -1119,6 +1164,9 @@ pub struct Engine {
     /// decompression outlasts a video frame): taken at its first long step. Only the
     /// tests set it, from the original's timing.
     pub deferred_vblanks: u16,
+    /// Of those, the ones that came after the frame's last long step (taken once its
+    /// bytecode is done).
+    pub deferred_tail: u16,
     pub vdp_events: Vec<VdpEvent>,
     /// `vdp_reg_0`.. (the register mirror), `hscroll_buffer` (planes A and B).
     pub vdp_regs: [u8; 0x13],
@@ -1133,13 +1181,14 @@ pub struct Engine {
     pub opponents_defeated: [u8; 18],
     /// The intro: `use_lair_background`, `word_FF1990` (the script's cue to the
     /// opponent), `word_FF198E`, `word_FF1994` (the opponent's x, for the box's tail),
-    /// `word_FF1126` (clouds paused), `byte_FF1128` (typing sound toggle), and an extra
+    /// `word_FF1126` (its high byte: clouds paused; the title keeps its state in the
+    /// word), `byte_FF1128` (typing sound toggle), and an extra
     /// cued that isn't ported.
     pub use_lair: u8,
     pub intro_cue: u16,
     pub intro_198e: u16,
     pub opponent_x: u16,
-    pub intro_pause: u8,
+    pub word_1126: u16,
     pub text_tick: u8,
     pub unported_extra: Option<u8>,
     /// `hblank_buffer_1`'s first word: the game over wave's phase.
@@ -1181,6 +1230,18 @@ pub struct Engine {
     pub fireworks_color: u16,
     pub line_slots: [u8; 8],
     pub line_maps: Vec<Vec<super::assets::sprites::Piece>>,
+    /// `swap_controls` (pad 2 plays player 1), `byte_FF196A`, `hblank_count` (raster
+    /// interrupts: none of the ported screens use them).
+    pub swap_controls: u8,
+    pub byte_196a: u8,
+    pub hblank_lines: u16,
+    /// `byte_FF0105` (the main menu's last mode) and the options (`$FFFCA4..`).
+    pub last_mode: u8,
+    pub options: [u8; 9],
+    /// `plane_a_buffer` ($700 words) and `use_plane_a_buffer`: while set, the vertical
+    /// blank copies the buffer to plane A ($C000).
+    pub plane_a_buffer: Vec<u16>,
+    pub use_plane_a_buffer: bool,
 }
 
 impl Engine {
@@ -1234,6 +1295,7 @@ impl Engine {
             bytecode_pc: 0,
             bytecode_disabled: true,
             deferred_vblanks: 0,
+            deferred_tail: 0,
             vdp_events: vec![],
             vdp_regs: [0; 0x13],
             hscroll: [0; 0x200],
@@ -1246,7 +1308,7 @@ impl Engine {
             intro_cue: 0,
             intro_198e: 0,
             opponent_x: 0,
-            intro_pause: 0,
+            word_1126: 0,
             text_tick: 0,
             hblank_count: 0,
             unported_note: None,
@@ -1259,6 +1321,13 @@ impl Engine {
             fireworks_color: 0,
             line_slots: [0; 8],
             line_maps: vec![vec![]; 8],
+            swap_controls: 0,
+            byte_196a: 0,
+            hblank_lines: 0,
+            last_mode: 0,
+            options: DEFAULT_OPTIONS,
+            plane_a_buffer: vec![0; 0x700],
+            use_plane_a_buffer: false,
             unported_extra: None,
             dma_queue: vec![],
             difficulty_option: 0,
@@ -1363,6 +1432,7 @@ impl Engine {
     /// A frame's logic after its vertical blank: the game flow, then the actors.
     pub fn logic(&mut self, inputs: &Inputs) -> Result<(), Unported> {
         self.run_bytecode(inputs)?;
+        self.deferred_vblanks += std::mem::take(&mut self.deferred_tail);
         self.long_step();
         self.long_actor = None;
         self.run_slots(0..SLOTS, inputs)?;
@@ -1389,6 +1459,21 @@ impl Engine {
     /// `Random`. (When the logic overruns a video frame, the ROM's vertical blank lands
     /// in the middle of `RunActors`; see `run_slots`.)
     pub fn vblank(&mut self) {
+        self.vblank_part(true);
+    }
+
+    /// A vertical blank whose `Random` (its last step) hasn't run yet: the original's
+    /// handler can still be busy when the next frame's snapshot is taken (the tests).
+    pub fn vblank_before_random(&mut self) {
+        self.vblank_part(false);
+    }
+
+    /// `Random`, for a vertical blank that finishes late (the tests).
+    pub fn random_draw(&mut self) {
+        self.random();
+    }
+
+    fn vblank_part(&mut self, with_random: bool) {
         self.frame_count = self.frame_count.wrapping_add(1);
         self.rng_calls = 0;
         self.icons_drawn = [false; 2];
@@ -1406,7 +1491,14 @@ impl Engine {
         }
         self.run_panel_commands();
         self.copy_palettes();
-        self.random();
+        if with_random {
+            self.random();
+        }
+        // TransferPlaneABuffer
+        if self.use_plane_a_buffer {
+            let words = self.plane_a_buffer.clone();
+            self.vdp_events.push(VdpEvent { at: self.plane_writes.len(), what: VdpOp::Words { at: 0xC000, words } });
+        }
         // HandleTime
         if (self.player_flags[0] | self.player_flags[1]) & 0x80 == 0 {
             self.time_frames = self.time_frames.saturating_add(1);
@@ -1480,6 +1572,23 @@ impl Engine {
                 Actor::HighScoreTable(t) => self.run_high_score_table(slot, t, inputs).map(Actor::HighScoreTable),
                 Actor::TableNameEntry(n) => self.run_table_name_entry(slot, n, inputs).map(Actor::TableNameEntry),
                 Actor::TableCursor(c) => self.run_table_cursor(c).map(Actor::TableCursor),
+                Actor::SegaLogo(l) => self.run_sega_logo(l).map(Actor::SegaLogo),
+                Actor::CtrlSkip(c) => self.run_ctrl_skip(c, inputs).map(Actor::CtrlSkip),
+                Actor::TitleHandler => self.run_title_handler(inputs).then_some(Actor::TitleHandler),
+                Actor::TitleFade(t) => self.run_title_fade(t).map(Actor::TitleFade),
+                Actor::TitleRobotnik(r) => self.run_title_robotnik(r).map(Actor::TitleRobotnik),
+                Actor::MachineText(m) => self.run_machine_text(slot, m).map(Actor::MachineText),
+                Actor::TitlePiece(p) => self.run_title_piece(p).map(Actor::TitlePiece),
+                Actor::TitleParticle(p) => self.run_title_particle(p).map(Actor::TitleParticle),
+                Actor::TitleBean(b) => self.run_title_bean(b, inputs).map(Actor::TitleBean),
+                Actor::RobotnikText { .. } => Some(Actor::RobotnikText { y: 0x90u16.wrapping_add(self.vscroll[0]) }),
+                Actor::Trademark => Some(Actor::Trademark),
+                Actor::MainMenu(m) => self.run_main_menu(m, inputs).map(Actor::MainMenu),
+                Actor::MenuClouds(c) => self.run_menu_clouds(c).map(Actor::MenuClouds),
+                Actor::Options(o) => self.run_options(o, inputs).map(Actor::Options),
+                Actor::PasswordEntry(p) => self.run_password_entry(p, inputs).map(Actor::PasswordEntry),
+                Actor::PasswordSprite(s) => self.run_password_sprite(s).map(Actor::PasswordSprite),
+                Actor::PasswordColors(c) => self.run_password_colors(c).map(Actor::PasswordColors),
                 Actor::DefeatSounds(s) => self.run_defeat_sounds(s).map(Actor::DefeatSounds),
                 Actor::DefeatShip(s) => self.run_defeat_ship(s).map(Actor::DefeatShip),
                 Actor::DefeatPiece(p) => self.run_defeat_piece(p).map(Actor::DefeatPiece),

@@ -65,6 +65,11 @@ pub fn apply_vdp(e: &mut Engine, vram: &mut Vram, boxes: &mut Vec<u16>, rom: &Ro
     Ok(())
 }
 
+/// `Game_Bytecode` (after the boot code's own checks) and the VDP registers it starts
+/// with.
+const GAME_BYTECODE: u32 = 0x18BA;
+const BOOT_VDP_REGS: [u8; 0x13] = [0x04, 0x64, 0x30, 0x3C, 0x07, 0x5E, 0, 0, 0, 0, 0, 0x03, 0x81, 0x2E, 0, 0x02, 0x03, 0, 0];
+
 /// `Opponents`: who you meet on each level.
 const OPPONENTS: u32 = 0x278E;
 /// `unk_DF8E`: the CPU's `byte_FF0104` by the difficulty option.
@@ -127,6 +132,35 @@ impl Game {
             rom,
             src,
             vram,
+            boxes: vec![],
+            pads: [Pad::default(); 2],
+            backwards: false,
+            refugee_frame: 0xFF,
+            cram: [0; 64],
+            vsram: [0; 40],
+        })
+    }
+
+    /// Power-on: the game flow from its first routine (`Game_Bytecode`), as the boot code
+    /// leaves things (VDP registers, controller repeat times, default high scores and
+    /// options; nothing in VRAM yet).
+    pub fn boot(seed: u32) -> Result<Game, String> {
+        let src = RomAssets::new()?;
+        let rom = Rom(super::rom::get().ok_or("no ROM installed")?);
+        let mut e = Engine::new();
+        e.rng = Rng::new(seed);
+        e.load_default_high_scores();
+        e.vdp_regs = BOOT_VDP_REGS;
+        e.repeat_times = (0x10, 3);
+        e.bytecode_pc = GAME_BYTECODE;
+        e.bytecode_disabled = false;
+        Ok(Game {
+            engine: e,
+            status: Status::Playing,
+            level: 0,
+            rom,
+            src,
+            vram: Vram(vec![0; 0x10000]),
             boxes: vec![],
             pads: [Pad::default(); 2],
             backwards: false,

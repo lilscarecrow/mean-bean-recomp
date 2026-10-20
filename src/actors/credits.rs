@@ -184,7 +184,7 @@ impl Engine {
         }
         match r.step {
             0 => {
-                self.intro_pause = 1;
+                self.word_1126 = (self.word_1126 & 0xFF) | 0x100;
                 r.busy = true;
                 // sub_1090A: only the last level has something (Has Bean).
                 if rom::byte(0x1098C + u32::from(self.level)) == 2 {
@@ -217,7 +217,7 @@ impl Engine {
                 }
             }
             3 => {
-                self.intro_pause = 0;
+                self.word_1126 &= 0xFF;
                 r.delay = 0x80;
             }
             5 => {

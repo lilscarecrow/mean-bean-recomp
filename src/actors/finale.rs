@@ -378,7 +378,7 @@ impl Engine {
     }
 
     pub(super) fn run_sparkle_spawner(&mut self, mut s: SparkleSpawner) -> Option<SparkleSpawner> {
-        if self.intro_pause != 0 {
+        if self.word_1126 >> 8 != 0 {
             return Some(s);
         }
         s.count = s.count.wrapping_add(1);
@@ -394,7 +394,7 @@ impl Engine {
     }
 
     pub(super) fn run_ship_sparkle(&mut self, mut s: ShipSparkle) -> Option<ShipSparkle> {
-        if self.intro_pause != 0 {
+        if self.word_1126 >> 8 != 0 {
             return Some(s);
         }
         s.tick = s.tick.wrapping_add(1);

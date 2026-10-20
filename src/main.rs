@@ -1,11 +1,11 @@
-﻿//! Dr. Robotnik's Mean Bean Machine, rebuilt: scenario mode on the ported engine, with
-//! the graphics read from your own ROM.
+//! Dr. Robotnik's Mean Bean Machine, recompiled: the game from power-on (Sega logo,
+//! title, menus, scenario mode) on the ported engine, with everything read from your own
+//! ROM.
 //!
 //! Usage: `bean-machine [path to the ROM]` (or set `MBM_ROM`). Arrows move, Z/X/C are
 //! A/B/C (turn), Enter is Start. Esc quits.
 
 use std::path::PathBuf;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use bean_machine::game::{Game, Status};
 use bean_machine::{pad, render, rom};
@@ -15,16 +15,15 @@ use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 
 const SCALE: f32 = 3.0;
-/// The first scenario stage (levels 0-2 are the lessons).
-const FIRST_LEVEL: u8 = 3;
-/// The difficulty option (0 easiest .. 3 hardest).
-const DIFFICULTY: u8 = 2;
+/// The random seed as the boot code leaves it (the game draws from it every frame, so
+/// what follows depends on when buttons are pressed, as on the console).
+const BOOT_SEED: u32 = 0x7FE7_B46A;
 
 #[derive(Resource)]
 struct Front {
     game: Game,
     screen: Handle<Image>,
-    /// Frames left showing a finished match before the next one starts.
+    /// Frames shown since the game reached something not ported yet.
     linger: u32,
 }
 
@@ -33,10 +32,6 @@ fn rom_path() -> Option<PathBuf> {
         let f = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../bean-machine-re/rom_path.txt");
         std::fs::read_to_string(f).ok().map(|s| PathBuf::from(s.trim()))
     })
-}
-
-fn seed() -> u32 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.subsec_nanos() ^ d.as_secs() as u32).unwrap_or(0x2A6D_365A)
 }
 
 fn main() {
@@ -81,7 +76,7 @@ fn setup(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
         custom_size: Some(Vec2::new(render::WIDTH as f32 * SCALE, render::HEIGHT as f32 * SCALE)),
         ..default()
     });
-    let game = Game::new(FIRST_LEVEL, DIFFICULTY, 0, seed()).expect("starting the game");
+    let game = Game::boot(BOOT_SEED).expect("starting the game");
     commands.insert_resource(Front { game, screen, linger: 0 });
 }
 
@@ -106,9 +101,8 @@ fn step(keys: Res<ButtonInput<KeyCode>>, mut front: ResMut<Front>, mut windows: 
     let p1 = buttons(&keys);
     front.game.frame([p1, 0]);
     if let Status::Stopped(why) = front.game.status.clone() {
-        // The flow reached a screen that isn't ported yet (the stage intro, game over):
-        // start the stage it was heading for. LevelEnd has already moved the level on
-        // after a win, and the score carries over.
+        // The flow reached something not ported yet (1P vs 2P, exercise mode, the
+        // attract mode's intro): say so for a second, then power on again.
         front.linger += 1;
         if front.linger == 1 {
             if let Ok(mut w) = windows.single_mut() {
@@ -116,11 +110,11 @@ fn step(keys: Res<ButtonInput<KeyCode>>, mut front: ResMut<Front>, mut windows: 
             }
         }
         if front.linger > 60 {
-            let e = &front.game.engine;
-            let won = e.last_winner == 0;
-            let score = if won { e.result_score } else { 0 };
-            if let Ok(g) = Game::new(e.level.clamp(3, 15), DIFFICULTY, score, seed()) {
+            if let Ok(g) = Game::boot(BOOT_SEED) {
                 front.game = g;
+            }
+            if let Ok(mut w) = windows.single_mut() {
+                w.title = "Dr. Robotnik's Mean Bean Machine".into();
             }
             front.linger = 0;
         }

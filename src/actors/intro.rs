@@ -648,7 +648,7 @@ impl Engine {
         if self.use_lair != 0 {
             return;
         }
-        self.intro_pause = 0;
+        self.word_1126 &= 0xFF;
         self.vdp_regs[0x0B] |= 3;
         if let Some(slot) = self.find_actor_slot() {
             let c = IntroClouds { pos: [0; 4], speed: [0xFFFF_0000, 0xFFFF_4000, 0xFFFF_8000, 0xFFFF_C000] };
@@ -658,7 +658,7 @@ impl Engine {
     }
 
     pub(super) fn run_intro_clouds(&mut self, mut c: IntroClouds) -> Option<IntroClouds> {
-        if self.intro_pause != 0 {
+        if self.word_1126 >> 8 != 0 {
             return Some(c);
         }
         for i in 0..4 {

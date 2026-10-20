@@ -107,8 +107,6 @@ const CURSOR_SCRIPT: u32 = 0xC536;
 /// The letters wrap at $1C (this revision; the later one stops at $1B going down).
 const LETTER_WRAP: u8 = 0x1C;
 
-/// The bytecode the table ends in: the title screen.
-pub const BC_TITLE: u32 = 0x195C;
 /// `LoadDefaultHighScores`' table (both modes, 5 x 16 bytes each).
 const DEFAULT_HIGH_SCORES: u32 = 0x354;
 /// `MapEni_HighScores`; `off_C78E`: the modes' titles.
