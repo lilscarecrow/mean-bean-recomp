@@ -236,7 +236,8 @@ impl Engine {
         let side = usize::from(id & 1);
         for (i, &b) in buffer.iter().enumerate() {
             let tile = if b & 0x80 != 0 { SPECIAL_TILES[usize::from(b & 1)] } else { (b + 1) << 1 };
-            self.tile_pair(SCORE_AT[side].wrapping_add(i as u16 * 2), SCORE_BASE[side], tile);
+            let at = if side == 0 { self.score_at } else { SCORE_AT[1] };
+            self.tile_pair(at.wrapping_add(i as u16 * 2), SCORE_BASE[side], tile);
         }
     }
 

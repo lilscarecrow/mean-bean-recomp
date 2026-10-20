@@ -98,6 +98,9 @@ fn flow_from(e: &mut Engine, ram: &Ram) {
     e.swap_controls = ram.u8(0xFF_1966);
     e.use_plane_a_buffer = ram.u16(0xFF_1956) != 0;
     e.word_112c = ram.u16(0xFF_112C);
+    e.score_at = ram.u16(0xFF_198A);
+    e.lesson = ram.u16(0xFF_196E);
+    e.lesson_tick = ram.u8(0xFF_1129);
     e.attract_turn = ram.u8(0xFF_1970);
     e.demo_stage = ram.u8(0xFF_1971);
     e.misc_buffer = ram.bytes(0xFF_6800, 0x2000).to_vec();
@@ -131,6 +134,7 @@ struct FlowSnap {
     options: [u8; 9],
     menu: (u8, bool),
     attract: (u8, u8),
+    lesson: (u16, u16, u8, u8, u8),
 }
 
 fn flow_snap(e: &Engine) -> FlowSnap {
@@ -150,6 +154,7 @@ fn flow_snap(e: &Engine) -> FlowSnap {
         options: e.options,
         menu: (e.last_mode, e.use_plane_a_buffer),
         attract: (e.attract_turn, e.demo_stage),
+        lesson: (e.lesson, e.score_at, e.lesson_tick, e.cpu_pressed, e.cpu_lean),
     }
 }
 
@@ -170,6 +175,7 @@ fn flow_snap_ram(ram: &Ram) -> FlowSnap {
         options: ram.bytes(0xFF_FCA4, 9).try_into().unwrap(),
         menu: (ram.u8(0xFF_0105), ram.u16(0xFF_1956) != 0),
         attract: (ram.u8(0xFF_1970), ram.u8(0xFF_1971)),
+        lesson: (ram.u16(0xFF_196E), ram.u16(0xFF_198A), ram.u8(0xFF_1129), ram.u8(0xFF_1D0C), ram.u8(0xFF_1D0D)),
     }
 }
 
@@ -178,6 +184,9 @@ const VSCROLL: u32 = 0xFF_05D2;
 
 fn globals_from(ram: &Ram) -> Engine {
     let mut e = Engine::new();
+    e.score_at = ram.u16(0xFF_198A);
+    e.cpu_pressed = ram.u8(0xFF_1D0C);
+    e.cpu_lean = ram.u8(0xFF_1D0D);
     for i in 0..2 {
         e.fields[i] = Field::from_words(&ram.field_words(i));
         let words = ram.field_words(i);
@@ -432,6 +441,8 @@ fn run_from(
     // (with the original's resume address of the actor at the cut when that actor took
     // a long step: it's still running until that changes)
     let mut finishing: Option<(usize, u16, Option<u32>)> = None;
+    // (the vertical blank at the cut was already taken, inside the actor before it)
+    let mut taken = 0u16;
     // A logic frame whose bytecode run spans several video frames (art decompression):
     // we run it at once, then only the ROM's vertical blanks until it's done.
     let mut pending: Option<(Inputs, u16)> = None;
@@ -466,6 +477,15 @@ fn run_from(
                 t.deferred_vblanks = during - 1;
                 t.deferred_tail = 1;
                 if t.logic(&started).is_ok() && mismatch(&t, cur).is_none() {
+                    engine = t;
+                }
+            }
+            // (or one came in the middle of one of GenPuyoOrder's Random calls)
+            if mismatch(&engine, cur).is_some() && during > 0 {
+                let mut t = before.clone();
+                t.deferred_vblanks = during - 1;
+                t.order_vblank = true;
+                if t.logic(&started).is_ok() && !t.order_vblank && mismatch(&t, cur).is_none() {
                     engine = t;
                 }
             }
@@ -527,11 +547,12 @@ fn run_from(
                 finishing = Some((cut, seen + vblanks, long_code));
                 continue;
             }
+            // (the vertical blanks since the cut)
+            let n = (seen + vblanks).saturating_sub(std::mem::take(&mut taken));
             let before = engine.clone();
-            for _ in 1..seen + vblanks {
+            for _ in 0..n {
                 engine.vblank();
             }
-            engine.vblank();
             if let Err(Unported(what)) = engine.run_slots(cut..SLOTS, &inputs) {
                 return Ok(format!("frame {f}: {what}"));
             }
@@ -541,7 +562,7 @@ fn run_from(
                 // (or the vertical blank came after the long frame ended)
                 let after = {
                     let mut t = before.clone();
-                    for _ in 1..seen + vblanks {
+                    for _ in 1..n {
                         t.vblank();
                     }
                     t.run_slots(cut..SLOTS, &inputs).is_ok().then(|| {
@@ -558,7 +579,7 @@ fn run_from(
                 // (or the rest of the frame was cut again, at a later slot)
                 let again = |k: usize, exact: bool| {
                     let mut t = before.clone();
-                    for _ in 0..seen + vblanks {
+                    for _ in 0..n {
                         t.vblank();
                     }
                     t.run_slots(cut..k, &inputs).ok()?;
@@ -576,7 +597,7 @@ fn run_from(
                 // a long step, else wherever the rest of the frame matches)
                 let next_frame = |k: usize, exact: bool| {
                     let mut t = before.clone();
-                    for _ in 1..seen + vblanks {
+                    for _ in 1..n {
                         t.vblank();
                     }
                     t.run_slots(cut..SLOTS, &inputs).ok()?;
@@ -596,7 +617,7 @@ fn run_from(
                     // (what the same cut into the next frame disagrees on, for debugging)
                     let probe = {
                         let mut t = before.clone();
-                        for _ in 1..seen + vblanks {
+                        for _ in 1..n {
                             t.vblank();
                         }
                         let _ = t.run_slots(cut..SLOTS, &inputs);
@@ -702,8 +723,29 @@ fn run_from(
                 let ok = if exact { mismatch(&t, cur).is_none() } else { mismatch_except(&t, cur, Some(cut)).is_none() };
                 ok.then_some((cut, t))
             };
-            // An actor that decompressed art this frame may be the one cut halfway.
+            // An actor that decompressed art this frame may be the one cut halfway: by a
+            // vertical blank at its long step (then the rest of the frame runs from the
+            // next slot), or one it's still in.
             let long = engine.long_actor.filter(|_| !no_split);
+            let mid = long.and_then(|s| {
+                let mut t = before.clone();
+                t.vblank();
+                t.run_bytecode(&inputs).ok()?;
+                t.long_step();
+                t.deferred_vblanks = 1;
+                t.run_slots(0..s + 1, &inputs).ok()?;
+                (t.deferred_vblanks == 0 && mismatch_except(&t, cur, Some(s)).is_none()).then_some((s + 1, t))
+            });
+            if let Some((next, t)) = mid {
+                if std::env::var("MBM_CUT_DEBUG").is_ok() {
+                    eprintln!("frame {f}: split inside slot {:X} (for: {m})", next - 1);
+                }
+                engine = t;
+                finishing = Some((next, 0, None));
+                taken = 1;
+                run.split += 1;
+                continue;
+            }
             let cut = if no_split {
                 None
             } else {

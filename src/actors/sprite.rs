@@ -54,6 +54,10 @@ impl Engine {
             Actor::GarbageColumn(c) => d(0x85, 6, c.frame, field_x(c.player, c.col), hi(c.fall.y)),
             Actor::Icon(i) => d(0xA2, 2, i.frame, hi(i.motion.x), hi(i.motion.y)),
             Actor::PreviewBean(v) => d(v.draw, v.color, v.anim.frame, v.x, v.y),
+            Actor::LessonPad(p) => {
+                let (x, y) = PAD_AT[usize::from(p.button)];
+                d(0x80, PAD_MAPPINGS, p.anim.frame, x, y)
+            }
             Actor::Referee(r) => d(r.draw, 0x19, r.anim.frame, r.x, r.y),
             Actor::Sparkle(s) => d(s.draw, 6, 0x0E, hi(s.motion.x), hi(s.motion.y)),
             Actor::DangerSpark(s) => d(s.draw, 0x25, s.anim.frame, hi(s.motion.x), hi(s.motion.y)),

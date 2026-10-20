@@ -147,6 +147,7 @@ pub fn load(ram: &Ram, slot: usize, tag: u8) -> Option<Actor> {
         PlayerState::FinalDone,
     ]
     .into_iter()
+    .chain(LessonState::ALL.map(PlayerState::Lesson))
     .find(|s| s.code() == code);
     if let Some(state) = player_state {
         return Some(Actor::Player(Player {
@@ -161,7 +162,7 @@ pub fn load(ram: &Ram, slot: usize, tag: u8) -> Option<Actor> {
             target: (ram.u8(a + 0x20), ram.u8(a + 0x21)),
             move_frames: ram.u8(a + 0x2C),
             pause_frames: ram.u8(a + 0x2D),
-            other_slot: slot_of(ram.u32(a + 0x2E)),
+            other_slot: slot_at(ram.u32(a + 0x2E)).unwrap_or(0),
             holder_slot: slot_at(ram.u32(a + 0x32)),
             w28: ram.u16(a + 0x28),
             pending_garbage: ram.u16(a + 0x14),
@@ -768,6 +769,24 @@ fn load_stage(ram: &Ram, a: u32, code: u32) -> Option<Actor> {
             step_b: ram.u8(a + 0x2B),
         }),
         PROLOGUE_CONTROL_CODE => Actor::PrologueControl,
+        0x13686 => Actor::LessonHelper(LessonHelper::Column { parent: slot_of(ram.u32(a + 0x2E)), anim: anim_from(ram, a) }),
+        0x136DC => Actor::LessonHelper(LessonHelper::Rotation { parent: slot_of(ram.u32(a + 0x2E)), anim: anim_from(ram, a) }),
+        0x1373C => Actor::LessonHelper(LessonHelper::Timer { parent: slot_of(ram.u32(a + 0x2E)), time: ram.u16(a + 0x26) }),
+        0x138D2 => Actor::LessonHelper(LessonHelper::Cue { parent: slot_of(ram.u32(a + 0x2E)), time: ram.u16(a + 0x26) }),
+        0xFFBE => Actor::LessonText(LessonText {
+            parent: slot_of(ram.u32(a + 0x2E)),
+            ptr: ram.u32(a + 0x32),
+            wait: ram.u16(a + 0x26),
+            pace: ram.u16(a + 0x2A),
+            at: ram.u16(a + 0x12),
+            sound: ram.u8(a + 8),
+            w28: ram.u16(a + 0x28),
+        }),
+        0x13274 | 0x1329A | 0x132E4 | 0x1330A => Actor::LessonPad(LessonPad {
+            button: code >= 0x132E4,
+            started: code == 0x1329A || code == 0x1330A,
+            anim: anim_from(ram, a),
+        }),
         0xDE0E => Actor::CoinSign,
         0xA212 | 0xA25C => Actor::Dissolve(Dissolve { second: code == 0xA25C, step: ram.u16(a + 0x28) }),
         MENU_CLOUDS_CODE => Actor::MenuClouds(MenuClouds { count: ram.u16(a + 0x26) }),
@@ -1142,6 +1161,9 @@ pub fn describe(actor: &Actor) -> String {
         Actor::PrologueControl => "prologue control".into(),
         Actor::CoinSign => "coin sign".into(),
         Actor::Dissolve(d) => format!("{d:X?}"),
+        Actor::LessonHelper(h) => format!("{h:X?}"),
+        Actor::LessonText(t) => format!("{t:X?}"),
+        Actor::LessonPad(p) => format!("{p:X?}"),
         Actor::PasswordEntry(p) => format!("{p:X?}"),
         Actor::PasswordSprite(s) => format!("{s:X?}"),
         Actor::PasswordColors(c) => format!("{c:X?}"),

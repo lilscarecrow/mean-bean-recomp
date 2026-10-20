@@ -63,6 +63,12 @@ impl Player {
 impl Engine {
     /// `GenPuyoOrder`: both players' bean orders for the match.
     pub fn deal_bean_orders(&mut self) {
+        if std::mem::take(&mut self.order_vblank) {
+            // (the vertical blank's own draw is lost)
+            let rng = self.rng;
+            self.vblank();
+            self.rng = rng;
+        }
         let orders = gen_bean_orders(&mut self.rng, self.level, self.level_mode);
         self.rng_calls += if self.level_mode == super::super::bean_order::LEVEL_MODE_SPLIT { 256 + 248 } else { 256 };
         self.bean_orders[0] = orders.p1.map(|c| c as u8);
@@ -75,6 +81,7 @@ impl Engine {
         if self.level_mode & 3 != 0 {
             return Err(Unported("starting a match outside scenario mode"));
         }
+        self.score_at = if self.swap_controls != 0 { 0xCC22 } else { 0xCB1E };
         self.time_frames = 0;
         self.time_minutes = 0;
         // loc_3C40: ClearScroll, then column vertical scroll on.
@@ -116,7 +123,7 @@ impl Engine {
         }
         // sub_3BB0
         if let Some(slot) = self.find_actor_slot() {
-            self.slots[slot] = Some(Actor::Animator(Animator { started: false, anim: Anim::default(), shown: 0 }));
+            self.slots[slot] = Some(Actor::Animator(Animator { started: false, anim: Anim::new(0), shown: 0 }));
         }
         // sub_1233A
         self.cpu_memory = [[0; 10]; 2];
@@ -137,7 +144,7 @@ impl Engine {
         if self.level_mode | self.level | p.id == 0 {
             return Err(Unported("the lesson's hint message (sub_11EF2)"));
         }
-        self.spawn_pair_holder(p);
+        self.spawn_pair_holder(p, 0);
         // loc_3D44
         self.popping[id] = false;
         self.fields[id] = Field::default(); // ResetPuyoField
@@ -152,9 +159,9 @@ impl Engine {
         Ok(())
     }
 
-    /// `sub_44EA`: the holder of the next pairs (filled back to front) and the two
-    /// preview beans.
-    fn spawn_pair_holder(&mut self, p: &mut Player) {
+    /// `sub_44EA` / `loc_44EE`: the holder of the next pairs (filled back to front)
+    /// and the two preview beans (`dy` lower).
+    pub(super) fn spawn_pair_holder(&mut self, p: &mut Player, dy: u16) {
         let Some(slot) = self.find_actor_slot() else { return };
         p.holder_slot = Some(slot);
         let mut h = PairHolder { w20: 0, pairs: [0; 6], dealt: 0, b07: 0 };
@@ -167,6 +174,7 @@ impl Engine {
         }
         self.slots[slot] = Some(Actor::PairHolder(h));
         let (x, y) = PREVIEW_AT[usize::from(p.id & 1)];
+        let y = y.wrapping_add(dy);
         for index in 0..2u8 {
             let Some(bean) = self.find_actor_slot() else { return };
             let y = y.wrapping_sub(u16::from(index) * 0x10);

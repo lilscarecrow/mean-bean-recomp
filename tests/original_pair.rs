@@ -67,6 +67,9 @@ fn run(input_lag: usize) -> (usize, Option<String>) {
                 continue;
             }
             let Some(player) = prev.player_actor(P1) else { continue };
+            if ai::is_cpu(prev.u8(support::addr::LEVEL_MODE), 0, prev.u8(CONTROL_P1)) {
+                continue; // the CPU plays P1 (the demo): see cpu_pair_matches_the_original_every_frame
+            }
             let code_now = cur.code(pivot);
             if code_now != PIVOT_FALLING && !PIVOT_LANDING.contains(&code_now) {
                 continue; // the pair went away for another reason (match end)

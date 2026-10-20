@@ -41,23 +41,38 @@ fn bean_orders_match_the_original() {
     for path in recordings() {
         let mut prev_seed = 0;
         let mut prev_order = vec![0u8; ORDER_LEN];
+        let mut prev_p2 = vec![0u8; ORDER_LEN];
+        // An order that changed, checked once it holds for a frame (GenPuyoOrder can
+        // outlast a video frame, leaving a half-shuffled order in one snapshot), with the
+        // seed from before it began.
+        let mut pending: Option<usize> = None;
+        let mut start_seed: Option<u32> = None;
         for (frame, ram) in frames(&path).enumerate() {
             let p1 = ram.bytes(addr::P1_BEAN_ORDER, ORDER_LEN);
+            let p2 = ram.bytes(addr::P2_BEAN_ORDER, ORDER_LEN);
             // Frame 0 has no previous frame (recordings may start from a savestate mid-match).
-            if frame > 0 && p1 != prev_order.as_slice() && p1.iter().any(|&b| b != 0) {
+            let changed = frame > 0 && p1 != prev_order.as_slice() && p1.iter().any(|&b| b != 0);
+            if changed {
+                start_seed.get_or_insert(prev_seed);
+                // (the tutorial copies its own beans into P1's order only)
+                pending = (p2 != prev_p2.as_slice() || pending.is_some()).then_some(frame);
+            } else if let (Some(at), Some(seed)) = (pending.take(), start_seed.take()) {
                 let (level, mode) = (ram.u8(addr::LEVEL), ram.u8(addr::LEVEL_MODE));
-                let p2 = ram.bytes(addr::P2_BEAN_ORDER, ORDER_LEN);
-                // The order was generated some RNG calls after last frame's seed.
-                let mut start = Rng::new(prev_seed);
+                // The order was generated some RNG calls after that seed.
+                let mut start = Rng::new(seed);
                 let found = (0..MAX_CALLS_PER_FRAME).any(|_| {
                     let orders = gen_bean_orders(&mut start.clone(), level, mode);
                     start.next();
                     orders.p1.map(|b| b as u8) == *p1 && orders.p2.map(|b| b as u8) == *p2
                 });
-                assert!(found, "{}: frame {frame}: bean order (level {level}, mode {mode}) differs from ours", path.display());
+                assert!(found, "{}: frame {at}: bean order (level {level}, mode {mode}) differs from ours", path.display());
                 checked += 1;
             }
+            if !changed {
+                start_seed = None;
+            }
             prev_order.copy_from_slice(p1);
+            prev_p2.copy_from_slice(p2);
             prev_seed = ram.u32(addr::RNG_SEED);
         }
     }

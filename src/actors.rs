@@ -22,6 +22,7 @@ use super::rng::Rng;
 
 mod draw;
 mod attract;
+mod tutorial;
 mod credits;
 mod ending;
 mod epilogue;
@@ -43,6 +44,7 @@ mod stage;
 mod title;
 pub use draw::*;
 pub use attract::*;
+pub use tutorial::*;
 pub use credits::*;
 pub use ending::*;
 pub use epilogue::*;
@@ -222,6 +224,9 @@ pub enum Actor {
     Dissolve(Dissolve),
     /// `sub_DE0E`.
     CoinSign,
+    LessonHelper(LessonHelper),
+    LessonText(LessonText),
+    LessonPad(LessonPad),
 }
 
 impl Actor {
@@ -234,6 +239,7 @@ impl Actor {
                 | Actor::GarbageClear(_)
                 | Actor::Icon(_)
                 | Actor::OpaqueQuick
+                | Actor::LessonHelper(LessonHelper::Cue { .. })
                 | Actor::Sparkle(_)
                 | Actor::DangerSpark(_)
                 | Actor::Star(_)
@@ -355,6 +361,9 @@ impl Actor {
             Actor::PasswordSprite(s) => Some(s.kind.code()),
             Actor::PrologueControl => Some(PROLOGUE_CONTROL_CODE),
             Actor::Dissolve(d) => Some(d.code()),
+            Actor::LessonHelper(h) => Some(h.code()),
+            Actor::LessonText(_) => Some(0xFFBE),
+            Actor::LessonPad(p) => Some(p.code()),
             Actor::CoinSign => Some(0xDE0E),
             Actor::PasswordColors(c) => Some(if c.started { PASSWORD_COLORS_CODE } else { 0xD3B4 }),
             Actor::FfuzzyPalette(p) => Some(if p.started { FFUZZY_PALETTE_CODE } else { 0x6E46 }),
@@ -456,6 +465,8 @@ pub enum PlayerState {
     FallWait,
     /// $3F5C: next chain step, look for pops again.
     ChainNext,
+    /// The tutorial's player (`loc_133FA`).
+    Lesson(LessonState),
 }
 
 impl PlayerState {
@@ -504,6 +515,7 @@ impl PlayerState {
             PlayerState::Compact => 0x3F34,
             PlayerState::FallWait => 0x3F42,
             PlayerState::ChainNext => 0x3F5C,
+            PlayerState::Lesson(s) => s.code(),
         }
     }
 }
@@ -1121,7 +1133,8 @@ pub struct Engine {
     pub cpu_memory: [ai::CpuMemory; 2],
     /// Pad reads since the last plan (`byte_FF1D0A` / `_0B`).
     pub cpu_reads: [u8; 2],
-    /// `byte_FF1D0C` / `byte_FF1D0D`: for the CPU's controller sprites (not ported).
+    /// `byte_FF1D0C` / `byte_FF1D0D`: a button pressed, which way the stick leans (for
+    /// the tutorial's joystick and button, which clear them).
     pub cpu_pressed: u8,
     pub cpu_lean: u8,
     /// `word_FF198C` (scenario mode): 2 if the CPU has 36+ beans, 1 if the player has.
@@ -1178,6 +1191,9 @@ pub struct Engine {
     /// Of those, the ones that came after the frame's last long step (taken once its
     /// bytecode is done).
     pub deferred_tail: u16,
+    /// And one in the middle of one of `GenPuyoOrder`'s `Random` calls (its shuffle
+    /// takes a while), which then writes its seed over the vertical blank's draw.
+    pub order_vblank: bool,
     pub vdp_events: Vec<VdpEvent>,
     /// `vdp_reg_0`.. (the register mirror), `hscroll_buffer` (planes A and B).
     pub vdp_regs: [u8; 0x13],
@@ -1263,6 +1279,12 @@ pub struct Engine {
     /// An actor clobbered `RunActors`' pointer (`loc_A212`): the rest of the slots
     /// don't run this frame.
     pub actors_derailed: bool,
+    /// `word_FF198A` (where P1's score is drawn), and the tutorial's `word_FF196E`
+    /// (high byte a count within the lesson, low byte the lesson) and `byte_FF1129`
+    /// (characters typed).
+    pub score_at: u16,
+    pub lesson: u16,
+    pub lesson_tick: u8,
 }
 
 impl Engine {
@@ -1316,6 +1338,7 @@ impl Engine {
             bytecode_pc: 0,
             bytecode_disabled: true,
             deferred_vblanks: 0,
+            order_vblank: false,
             deferred_tail: 0,
             vdp_events: vec![],
             vdp_regs: [0; 0x13],
@@ -1353,6 +1376,9 @@ impl Engine {
             word_112c: 0,
             attract_turn: 0,
             demo_stage: 0,
+            score_at: 0xCB1E,
+            lesson: 0,
+            lesson_tick: 0,
             actors_derailed: false,
             unported_extra: None,
             dma_queue: vec![],
@@ -1485,26 +1511,24 @@ impl Engine {
     /// `Random`. (When the logic overruns a video frame, the ROM's vertical blank lands
     /// in the middle of `RunActors`; see `run_slots`.)
     pub fn vblank(&mut self) {
-        self.vblank_part(true);
+        self.vblank_before_random();
+        self.random_draw();
     }
 
-    /// A vertical blank whose `Random` (its last step) hasn't run yet: the original's
-    /// handler can still be busy when the next frame's snapshot is taken (the tests).
+    /// A vertical blank whose `Random` (and the plane A buffer after it) hasn't run
+    /// yet: the original's handler can still be busy when the next frame's snapshot is
+    /// taken (the tests).
     pub fn vblank_before_random(&mut self) {
-        self.vblank_part(false);
-    }
-
-    /// `Random`, for a vertical blank that finishes late (the tests).
-    pub fn random_draw(&mut self) {
-        self.random();
-    }
-
-    fn vblank_part(&mut self, with_random: bool) {
         self.frame_count = self.frame_count.wrapping_add(1);
         self.rng_calls = 0;
         self.icons_drawn = [false; 2];
         self.rng_users.clear();
         self.current_slot = usize::MAX;
+        // HandleTime
+        if (self.player_flags[0] | self.player_flags[1]) & 0x80 == 0 {
+            self.time_frames = self.time_frames.saturating_add(1);
+        }
+        self.time_minutes = self.time_frames / 3600;
         // TransferDMA (before the plane commands)
         for what in std::mem::take(&mut self.dma_queue) {
             self.vdp_events.push(VdpEvent { at: self.plane_writes.len(), what });
@@ -1517,19 +1541,17 @@ impl Engine {
         }
         self.run_panel_commands();
         self.copy_palettes();
-        if with_random {
-            self.random();
-        }
+    }
+
+    /// The rest of a vertical blank: `Random`, then the plane A buffer (alone, for one
+    /// that finishes late: the tests).
+    pub fn random_draw(&mut self) {
+        self.random();
         // TransferPlaneABuffer
         if self.use_plane_a_buffer {
             let words = self.plane_a_buffer.clone();
             self.vdp_events.push(VdpEvent { at: self.plane_writes.len(), what: VdpOp::Words { at: 0xC000, words } });
         }
-        // HandleTime
-        if (self.player_flags[0] | self.player_flags[1]) & 0x80 == 0 {
-            self.time_frames = self.time_frames.saturating_add(1);
-        }
-        self.time_minutes = self.time_frames / 3600;
     }
 
     /// `RunActors` over some of the slots (all of them in a normal frame).
@@ -1617,6 +1639,9 @@ impl Engine {
                 Actor::PasswordColors(c) => self.run_password_colors(c).map(Actor::PasswordColors),
                 Actor::PrologueControl => self.run_prologue_control(inputs).then_some(Actor::PrologueControl),
                 Actor::Dissolve(d) => self.run_dissolve(d).map(Actor::Dissolve),
+                Actor::LessonHelper(h) => self.run_lesson_helper(h).map(Actor::LessonHelper),
+                Actor::LessonText(t) => self.run_lesson_text(t).map(Actor::LessonText),
+                Actor::LessonPad(p) => self.run_lesson_pad(p).map(Actor::LessonPad),
                 Actor::CoinSign => None,
                 Actor::DefeatSounds(s) => self.run_defeat_sounds(s).map(Actor::DefeatSounds),
                 Actor::DefeatShip(s) => self.run_defeat_ship(s).map(Actor::DefeatShip),
@@ -1667,6 +1692,7 @@ impl Engine {
     fn run_player(&mut self, slot: usize, mut p: Player, inputs: &Inputs) -> Result<Option<Player>, Unported> {
         use PlayerState::*;
         match p.state {
+            Lesson(s) => return self.run_lesson_player(slot, p, s, inputs),
             WaitPair => {
                 p.w26 = (p.w26 & 0x00FF) | (u16::from(((p.w26 >> 8) as u8).wrapping_add(1)) << 8);
                 if p.flags & (flag::PIVOT_ACTIVE | flag::SATELLITE_ACTIVE) == 0 {
@@ -1678,10 +1704,7 @@ impl Engine {
                 }
             }
             FindPops => {
-                // sub_5960 also leaves links and group marks, which the CPU reads later.
-                self.ai_fields[p.id as usize].render(&self.fields[p.id as usize], true);
-                self.relink_bytes(p.id as usize & 1);
-                p.w26 = self.fields[p.id as usize].find_pops().len() as u16;
+                self.count_pops(&mut p);
                 p.state = Redraw;
             }
             Redraw => {
@@ -1690,21 +1713,8 @@ impl Engine {
             }
             Decide => {
                 if p.w26 != 0 {
-                    // loc_3EDA: the popping beans and the garbage they clear (sub_58C8).
-                    let field = &self.fields[p.id as usize];
-                    let groups = field.find_pops();
-                    let mut cells: Vec<(usize, usize)> = groups.iter().flat_map(|g| g.cells.iter().copied()).collect();
-                    for (c, r) in cells.clone() {
-                        for (dc, dr) in DIR {
-                            let (nc, nr) = (c as i16 + dc, r as i16 + dr);
-                            let cell = (nc as usize, nr as usize);
-                            if nr >= HIDDEN_ROWS as i16 && field.get(nc, nr) == Some(BeanColor::Garbage) && !cells.contains(&cell) {
-                                cells.push(cell);
-                            }
-                        }
-                    }
-                    let backup_bytes = self.field_bytes[p.id as usize & 1].cells;
-                    p.pop = Some(PopWork { groups, cells, backup: field.clone(), backup_bytes, falling: vec![] });
+                    // loc_3EDA
+                    self.start_pops(&mut p);
                     self.chaining[p.id as usize & 1] = true;
                     self.cpu_memory[p.id as usize & 1][1] = 0; // sub_11ECE
                     p.state = PopScore;
@@ -1719,25 +1729,11 @@ impl Engine {
                 p.state = PopBackup;
             }
             PopBackup => {
-                let backup = self.fields[p.id as usize].clone();
-                let backup_bytes = self.field_bytes[p.id as usize & 1].cells;
-                let work = p.pop.as_mut().unwrap();
-                work.backup = backup;
-                work.backup_bytes = backup_bytes;
-                p.delay = 0x18;
+                self.back_up_pops(&mut p);
                 p.state = Blink;
             }
             Blink => {
-                // sub_49D2: shown on even delay values, hidden on odd ones.
-                let work = p.pop.as_ref().unwrap();
-                let field = &mut self.fields[p.id as usize];
-                for &(c, r) in &work.cells {
-                    let shown = if p.delay & 1 == 0 { work.backup.get(c as i16, r as i16) } else { None };
-                    field.set(c, r, shown);
-                }
-                let (cells, backup_bytes) = (work.cells.clone(), work.backup_bytes);
-                self.blink_bytes(p.id as usize & 1, &cells, &backup_bytes, p.delay & 1 == 0);
-                if wait(&mut p.delay) {
+                if self.blink_pops(&mut p) {
                     p.state = PopSpawn;
                 }
             }
@@ -1757,11 +1753,7 @@ impl Engine {
                 }
             }
             Compact => {
-                let id = p.id as usize;
-                let work = p.pop.as_mut().unwrap();
-                work.falling = close_gaps(&mut self.fields[id], &work.backup);
-                self.compact_bytes(id & 1);
-                p.flags |= FALLING_AFTER_POP;
+                self.compact_pops(&mut p);
                 p.state = FallWait;
             }
             FallWait => {
@@ -1848,6 +1840,65 @@ impl Engine {
             }
         }
         Ok(Some(p))
+    }
+
+    /// `sub_5960`: the pops in the field (`w26`); it also leaves links and group
+    /// marks, which the CPU reads later.
+    fn count_pops(&mut self, p: &mut Player) {
+        let id = p.id as usize;
+        self.ai_fields[id].render(&self.fields[id], true);
+        self.relink_bytes(id & 1);
+        p.w26 = self.fields[id].find_pops().len() as u16;
+    }
+
+    /// `sub_58C8`: the popping beans and the garbage they clear.
+    fn start_pops(&mut self, p: &mut Player) {
+        let field = &self.fields[p.id as usize];
+        let groups = field.find_pops();
+        let mut cells: Vec<(usize, usize)> = groups.iter().flat_map(|g| g.cells.iter().copied()).collect();
+        for (c, r) in cells.clone() {
+            for (dc, dr) in DIR {
+                let (nc, nr) = (c as i16 + dc, r as i16 + dr);
+                let cell = (nc as usize, nr as usize);
+                if nr >= HIDDEN_ROWS as i16 && field.get(nc, nr) == Some(BeanColor::Garbage) && !cells.contains(&cell) {
+                    cells.push(cell);
+                }
+            }
+        }
+        let backup_bytes = self.field_bytes[p.id as usize & 1].cells;
+        p.pop = Some(PopWork { groups, cells, backup: field.clone(), backup_bytes, falling: vec![] });
+    }
+
+    /// `sub_49BA`: back up the field, then blink for 24 frames.
+    fn back_up_pops(&mut self, p: &mut Player) {
+        let backup = self.fields[p.id as usize].clone();
+        let backup_bytes = self.field_bytes[p.id as usize & 1].cells;
+        let work = p.pop.as_mut().unwrap();
+        work.backup = backup;
+        work.backup_bytes = backup_bytes;
+        p.delay = 0x18;
+    }
+
+    /// `sub_49D2`: shown on even delay values, hidden on odd ones. True when done.
+    fn blink_pops(&mut self, p: &mut Player) -> bool {
+        let work = p.pop.as_ref().unwrap();
+        let field = &mut self.fields[p.id as usize];
+        for &(c, r) in &work.cells {
+            let shown = if p.delay & 1 == 0 { work.backup.get(c as i16, r as i16) } else { None };
+            field.set(c, r, shown);
+        }
+        let (cells, backup_bytes) = (work.cells.clone(), work.backup_bytes);
+        self.blink_bytes(p.id as usize & 1, &cells, &backup_bytes, p.delay & 1 == 0);
+        wait(&mut p.delay)
+    }
+
+    /// `sub_4DB8`: close the gaps; the beans' fall animation starts.
+    fn compact_pops(&mut self, p: &mut Player) {
+        let id = p.id as usize;
+        let work = p.pop.as_mut().unwrap();
+        work.falling = close_gaps(&mut self.fields[id], &work.backup);
+        self.compact_bytes(id & 1);
+        p.flags |= FALLING_AFTER_POP;
     }
 
     /// `loc_4F3A`: the pair stops (hidden) when its player's pivot flag goes; from then

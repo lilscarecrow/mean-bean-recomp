@@ -269,7 +269,7 @@ impl Engine {
     }
 
     /// `sub_7926`: the loser's field falls away; `w26` counts the actors still busy.
-    fn wipe_field(&mut self, p: &mut Player) {
+    pub(super) fn wipe_field(&mut self, p: &mut Player) {
         let id = p.id as usize & 1;
         // The beans lose their sideways links, and the field is redrawn.
         for i in HIDDEN_ROWS * COLS..ROWS * COLS {
