@@ -39,7 +39,13 @@ pub enum PanelCommand {
     Time(u16),
     /// $99: the results' bonus line, with the points left to add.
     Bonus(u16),
+    /// $92: the game over countdown's digit (`byte_66C9A`, 5 x 7 tiles).
+    Countdown(u8),
 }
+
+/// `SpecPlane92`'s digits (5 x 7 words each, less $1E00) and where they go.
+const COUNTDOWN_DIGITS: u32 = 0x66C9A;
+const COUNTDOWN_AT: u16 = 0xE70C;
 
 /// `StageTextStrings`: per entry, a count of strings - 1, then per string the plane
 /// address (0: a field-relative offset follows), the tile base, the tile bytes up to $FF
@@ -127,6 +133,13 @@ impl Engine {
                     self.result_line(2);
                     self.result_line(3);
                     self.result_number(BONUS_AT, points);
+                }
+                PanelCommand::Countdown(digit) => {
+                    let from = COUNTDOWN_DIGITS + u32::from(digit) * 0x46;
+                    for i in 0..35u16 {
+                        let to = COUNTDOWN_AT.wrapping_add((i / 5) * 0x80).wrapping_add((i % 5) * 2);
+                        self.plane_writes.push((to, rom::word(from + u32::from(i) * 2).wrapping_sub(0x1E00)));
+                    }
                 }
                 PanelCommand::Banner(t) => {
                     // SpecPlane9B: 2 rows from the top edge down, then 2 rows from the

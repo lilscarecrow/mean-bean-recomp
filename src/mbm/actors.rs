@@ -23,6 +23,7 @@ use super::rng::Rng;
 mod draw;
 mod ending;
 mod flow;
+mod game_over;
 mod intro;
 mod lair;
 mod opponent;
@@ -34,6 +35,7 @@ mod stage;
 pub use draw::*;
 pub use ending::*;
 pub use flow::*;
+pub use game_over::*;
 pub use intro::*;
 pub use lair::*;
 pub use opponent::*;
@@ -149,6 +151,9 @@ pub enum Actor {
     LairFlier(LairFlier),
     LairLights(LairLights),
     ThrownPiece(ThrownPiece),
+    GameOverTimer(GameOverTimer),
+    GameOverLetter(GameOverLetter),
+    GameOverRobotnik(GameOverRobotnik),
 }
 
 impl Actor {
@@ -172,6 +177,7 @@ impl Actor {
                 | Actor::LairLights(_)
                 | Actor::IntroExtra(IntroExtra::Sparks { .. })
                 | Actor::ShakeField(_)
+                | Actor::GameOverLetter(_)
         )
     }
 
@@ -229,6 +235,9 @@ impl Actor {
             Actor::LairFlier(f) => Some(f.code()),
             Actor::LairLights(_) => Some(LAIR_LIGHTS_CODE),
             Actor::ThrownPiece(p) => Some(p.code()),
+            Actor::GameOverTimer(t) => Some(if t.done { 0xDB64 } else { GAME_OVER_TIMER_CODE }),
+            Actor::GameOverLetter(l) => Some(l.phase.code()),
+            Actor::GameOverRobotnik(r) => Some(if r.started { GAME_OVER_ROBOTNIK_CODE } else { 0xEE10 }),
             Actor::FfuzzyPalette(p) => Some(if p.started { FFUZZY_PALETTE_CODE } else { 0x6E46 }),
             Actor::PaletteFade(_) => Some(PALETTE_FADE_CODE),
             Actor::Star(s) => Some(s.state.code()),
@@ -1070,6 +1079,8 @@ pub struct Engine {
     pub intro_pause: u8,
     pub text_tick: u8,
     pub unported_extra: Option<u8>,
+    /// `hblank_buffer_1`'s first word: the game over wave's phase.
+    pub hblank_count: u16,
     /// `dma_queue`: transfers the next vertical blank makes (before its plane commands).
     pub dma_queue: Vec<VdpOp>,
     /// `difficulty` (the option: 0-3) and `byte_FF0114` (stages the time bonus allows for).
@@ -1155,6 +1166,7 @@ impl Engine {
             opponent_x: 0,
             intro_pause: 0,
             text_tick: 0,
+            hblank_count: 0,
             unported_extra: None,
             dma_queue: vec![],
             difficulty_option: 0,
@@ -1363,6 +1375,9 @@ impl Engine {
                 Actor::LairFlier(f) => self.run_lair_flier(f).map(Actor::LairFlier),
                 Actor::LairLights(l) => self.run_lair_lights(l).map(Actor::LairLights),
                 Actor::ThrownPiece(p) => self.run_thrown_piece(p).map(Actor::ThrownPiece),
+                Actor::GameOverTimer(t) => self.run_game_over_timer(t, inputs).map(Actor::GameOverTimer),
+                Actor::GameOverLetter(l) => self.run_game_over_letter(l).map(Actor::GameOverLetter),
+                Actor::GameOverRobotnik(r) => self.run_game_over_robotnik(r).map(Actor::GameOverRobotnik),
                 Actor::FfuzzyPalette(p) => self.run_ffuzzy_palette(p).map(Actor::FfuzzyPalette),
                 Actor::PaletteFade(pf) => self.run_palette_fade(pf).map(Actor::PaletteFade),
                 Actor::Star(st) => self.run_star(st).map(Actor::Star),

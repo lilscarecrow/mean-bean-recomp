@@ -13,6 +13,7 @@
 //! Not ported yet: the last stage's lair intro (`use_lair_background`).
 
 use super::*;
+use crate::mbm::assets::nemesis;
 use crate::mbm::rom;
 
 /// `ActLevelIntro`: the script (+$32), the wait (+$26), the box (+$07 shown, +$12 its
@@ -309,6 +310,11 @@ impl Engine {
                 // The font, decompressed to RAM with every pixel's bit 0 set, DMAed to $0000.
                 self.long_step();
                 self.dma_queue.push(VdpOp::Font { vram: 0, art: FONT_ART });
+                // It's decompressed into hblank_buffer_1, whose first word the game over
+                // wave later counts on from.
+                if let Some(Ok((font, _))) = rom::get().map(|r| nemesis::decompress(&r[FONT_ART as usize..])) {
+                    self.hblank_count = u16::from_be_bytes([font[0], font[1]]) | 0x1111;
+                }
                 s.ptr = rom::long(SCRIPTS + u32::from(self.opponent) * 4);
                 s.state = IntroScriptState::Run;
                 return Some(s);

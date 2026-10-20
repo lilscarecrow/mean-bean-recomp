@@ -73,6 +73,8 @@ impl Engine {
             Actor::RobotnikIntro(r) => d(0x80, 0x2B, r.frame, r.x, r.y),
             Actor::LairSprite(s) => d(s.draw, s.mappings, s.anim.frame, s.x, s.y),
             Actor::LairFlier(f) => d(f.draw, 0x40, f.anim.frame, hi(f.motion.x), hi(f.motion.y)),
+            Actor::GameOverLetter(l) => d(0x83, GAME_OVER_LETTER_MAPPINGS, l.frame, hi(l.motion.x), hi(l.motion.y)),
+            Actor::GameOverRobotnik(r) => d(0x80, GAME_OVER_ROBOTNIK_MAPPINGS, r.frame, GAME_OVER_ROBOTNIK_AT.0, GAME_OVER_ROBOTNIK_AT.1),
             Actor::ThrownPiece(p) => d(p.draw, 0x2B, 0x1E, hi(p.motion.x), hi(p.motion.y)),
             Actor::IntroShip(s) => d(0x80, 0x40, s.anim.frame, 0xF1, 0xFFE0),
             Actor::OpponentScreen(s) => d(s.draw, OPPONENT_FLASH_MAPPINGS, 1, OPPONENT_FLASH_AT.0, OPPONENT_FLASH_AT.1),

@@ -90,6 +90,9 @@ pub struct Game {
     /// `draw_order`: DrawActors walks the slots forwards and backwards on alternate frames.
     backwards: bool,
     refugee_frame: u8,
+    /// CRAM and VSRAM as the last vertical blank left them.
+    cram: [u16; 64],
+    vsram: [u16; 40],
 }
 
 impl Game {
@@ -127,6 +130,8 @@ impl Game {
             pads: [Pad::default(); 2],
             backwards: false,
             refugee_frame: 0xFF,
+            cram: [0; 64],
+            vsram: [0; 40],
         })
     }
 
@@ -141,11 +146,17 @@ impl Game {
         }
         let mut inputs = Inputs::default();
         inputs.pads = [self.pads[0].input(), self.pads[1].input()];
-        if let Err(Unported(what)) = self.engine.frame(&inputs) {
+        // The picture is what the vertical blank sends the VDP: the art, maps, sprite
+        // table, scroll and colors from the logic before it (DMAed tiles and the
+        // sprites that use them arrive together).
+        self.engine.vblank();
+        self.update_vram();
+        self.cram = std::array::from_fn(|i| self.engine.palettes[i / 16][i % 16]);
+        self.vsram = self.engine.vscroll;
+        if let Err(Unported(what)) = self.engine.logic(&inputs) {
             self.status = Status::Stopped(what.to_string());
         }
         self.engine.match_over = false;
-        self.update_vram();
     }
 
     /// The VDP layout the registers set.
@@ -208,8 +219,7 @@ impl Game {
 
     /// The picture as RGBA (320 x 224).
     pub fn picture(&self) -> Vec<u8> {
-        let cram: [u16; 64] = std::array::from_fn(|i| self.engine.palettes[i / 16][i % 16]);
-        let pixels = render::render(&self.layout(), &self.vram.0, &cram, &self.engine.vscroll);
+        let pixels = render::render(&self.layout(), &self.vram.0, &self.cram, &self.vsram);
         let mut out = Vec::with_capacity(pixels.len() * 4);
         for p in pixels {
             let [r, g, b] = render::to_rgb(p);

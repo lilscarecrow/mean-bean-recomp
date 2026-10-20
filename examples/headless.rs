@@ -1,5 +1,6 @@
 //! Runs a stage without a window and writes frames as PPM images (for checking the
-//! picture). Usage: cargo run --release --example headless -- <rom> <frames> <every> <outdir> [level]
+//! picture). Usage: cargo run --release --example headless -- <rom> <frames> <every> <outdir> [level] [a_from]
+//! (`a_from`: from that frame on, tap A instead: name entry letters, the game over countdown).
 use bean_machine::mbm::{game::Game, rom};
 
 fn main() {
@@ -9,10 +10,17 @@ fn main() {
     let out = std::path::Path::new(&args[4]);
     std::fs::create_dir_all(out).unwrap();
     let level = args.get(5).and_then(|l| l.parse().ok()).unwrap_or(3);
+    let a_from: u32 = args.get(6).and_then(|l| l.parse().ok()).unwrap_or(u32::MAX);
     let mut game = Game::new(level, 2, 0, 0x1234_5678).expect("game");
     for f in 0..frames {
         // Hold nothing; tap down now and then so pairs come down.
-        let p1 = if f % 4 == 0 { bean_machine::mbm::pad::DOWN } else { 0 };
+        let p1 = if f >= a_from {
+            if f % 16 == 0 { bean_machine::mbm::pad::A } else { 0 }
+        } else if f % 4 == 0 {
+            bean_machine::mbm::pad::DOWN
+        } else {
+            0
+        };
         game.frame([p1, 0]);
         if f % every == 0 || f + 1 == frames {
             let rgba = game.picture();

@@ -85,6 +85,7 @@ fn flow_from(e: &mut Engine, ram: &Ram) {
     e.opponent_x = ram.u16(0xFF_1994);
     e.intro_pause = ram.u8(0xFF_1126);
     e.text_tick = ram.u8(0xFF_1128);
+    e.hblank_count = ram.u16(0xFF_5000);
     e.repeat_times = (ram.u8(0xFF_1108), ram.u8(0xFF_1109));
     e.input_lock = ram.u16(0xFF_1122);
     e.level_transition = ram.u16(0xFF_1974);
