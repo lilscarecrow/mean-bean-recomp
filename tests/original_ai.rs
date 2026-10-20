@@ -141,12 +141,20 @@ fn planner_matches_the_original() {
             if poked.contains(&frame) || poked.contains(&(frame - 1)) {
                 continue;
             }
+            // (both CPUs can plan in the same frame, in the demo: the second starts from
+            // the scratch the first left)
+            let mut scratch_now: Option<ai::PlanScratch> = None;
             for (i, tag) in [P1, P2].into_iter().enumerate() {
                 let (Some(a), Some(b)) = (p.player_actor(tag), cur.player_actor(tag)) else { continue };
                 if a != b || p.code(a) != 0x3E1A || cur.code(b) != 0x3E44 {
                     continue;
                 }
                 let id = cur.u8(b + 0x2A);
+                // (the demo, two CPUs dealing in the same frames, is left to the whole-match
+                // test, which checks the plans, their timers and the RNG every frame)
+                if p.u8(support::addr::LEVEL_MODE) & 4 != 0 {
+                    continue;
+                }
                 if !ai::is_cpu(p.u8(support::addr::LEVEL_MODE), id, p.u8(CONTROL_P1)) {
                     continue;
                 }
@@ -170,7 +178,7 @@ fn planner_matches_the_original() {
                     let mut r = rng;
                     let mut plan = plan_of(&p, a);
                     let mut mem: ai::CpuMemory = p.bytes(CPU_MEMORY[i], 10).try_into().unwrap();
-                    let mut scratch = scratch_of(&p);
+                    let mut scratch = scratch_now.clone().unwrap_or_else(|| scratch_of(&p));
                     let (mut pairs, mut order) = dealt(&p);
                     let mut pairs6: [u8; 6] = pairs[..].try_into().unwrap();
                     let mut order256: [u8; 256] = order[..].try_into().unwrap();
@@ -190,6 +198,7 @@ fn planner_matches_the_original() {
                         hit
                     });
                     if got == want && reaches_end {
+                        scratch_now = Some(got.2.clone());
                         outcome = Some(Ok(()));
                         break;
                     }

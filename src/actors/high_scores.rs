@@ -28,8 +28,13 @@ pub enum TablePhase {
     Slide,
     /// $C70A: `ActorBookmark_Ctrl` for $100 frames.
     Wait,
-    /// $C710: then hands back to the flow.
+    /// $C710: then hands back to the flow (or, with `byte_FF1973`, on to the next
+    /// mode's table).
     Done,
+    /// $C744: the table sliding out.
+    SlideOut,
+    /// $C760: the next one drawn.
+    Next,
 }
 
 impl TablePhase {
@@ -39,6 +44,8 @@ impl TablePhase {
             TablePhase::Slide => 0xC68E,
             TablePhase::Wait => 0xC70A,
             TablePhase::Done => 0xC710,
+            TablePhase::SlideOut => 0xC744,
+            TablePhase::Next => 0xC760,
         }
     }
 }
@@ -152,7 +159,15 @@ impl Engine {
     pub(super) fn run_high_score_table(&mut self, slot: usize, mut t: HighScoreTable, inputs: &Inputs) -> Option<HighScoreTable> {
         let press = (inputs.pads[0].press | inputs.pads[1].press) & 0xF0;
         match t.phase {
-            TablePhase::Draw => {
+            TablePhase::SlideOut => {
+                self.table_scroll(t.scroll.wrapping_sub(0x140));
+                t.scroll -= 4;
+                if t.scroll == 0 {
+                    t.phase = TablePhase::Next;
+                }
+                return Some(t);
+            }
+            TablePhase::Draw | TablePhase::Next => {
                 t.scroll = 0x13C;
                 self.table_scroll(0x140);
                 self.draw_table_title();
@@ -219,9 +234,14 @@ impl Engine {
                 if t.busy {
                     return Some(t);
                 }
-                // loc_C710 / loc_C71A: the second table (byte_FF1973) isn't shown here.
+                // loc_C71A
                 if self.high_score_both {
-                    self.unported_note = Some("the second high score table (byte_FF1973)");
+                    self.high_score_table = self.high_score_table.wrapping_add(1);
+                    if self.high_score_table != 2 {
+                        t.scroll = 0x140;
+                        t.phase = TablePhase::SlideOut;
+                        return Some(t);
+                    }
                 }
                 if !t.released {
                     self.bytecode_disabled = false;

@@ -21,6 +21,7 @@ use super::assets::planes::FIELD_ORIGIN;
 use super::rng::Rng;
 
 mod draw;
+mod attract;
 mod credits;
 mod ending;
 mod epilogue;
@@ -41,6 +42,7 @@ mod sprite;
 mod stage;
 mod title;
 pub use draw::*;
+pub use attract::*;
 pub use credits::*;
 pub use ending::*;
 pub use epilogue::*;
@@ -215,6 +217,11 @@ pub enum Actor {
     PasswordEntry(PasswordEntry),
     PasswordSprite(PasswordSprite),
     PasswordColors(PasswordColors),
+    /// `sub_F074`.
+    PrologueControl,
+    Dissolve(Dissolve),
+    /// `sub_DE0E`.
+    CoinSign,
 }
 
 impl Actor {
@@ -245,6 +252,7 @@ impl Actor {
                 | Actor::Typist(_)
                 | Actor::HasBean(_)
                 | Actor::FireworkColors(_)
+                | Actor::CoinSign
                 | Actor::FireworkSpawner(_)
         )
     }
@@ -345,6 +353,9 @@ impl Actor {
             Actor::Options(o) => Some(o.code()),
             Actor::PasswordEntry(p) => Some(p.code()),
             Actor::PasswordSprite(s) => Some(s.kind.code()),
+            Actor::PrologueControl => Some(PROLOGUE_CONTROL_CODE),
+            Actor::Dissolve(d) => Some(d.code()),
+            Actor::CoinSign => Some(0xDE0E),
             Actor::PasswordColors(c) => Some(if c.started { PASSWORD_COLORS_CODE } else { 0xD3B4 }),
             Actor::FfuzzyPalette(p) => Some(if p.started { FFUZZY_PALETTE_CODE } else { 0x6E46 }),
             Actor::PaletteFade(_) => Some(PALETTE_FADE_CODE),
@@ -1242,6 +1253,16 @@ pub struct Engine {
     /// blank copies the buffer to plane A ($C000).
     pub plane_a_buffer: Vec<u16>,
     pub use_plane_a_buffer: bool,
+    /// The attract mode: `misc_buffer_1` (the prologue's robots' art, kept in RAM),
+    /// `word_FF112C` (its controller's step; the epilogue keeps the clouds' slot in the
+    /// same long), `byte_FF1970` (tutorial or demo next), `byte_FF1971` (the demo's stage).
+    pub misc_buffer: Vec<u8>,
+    pub word_112c: u16,
+    pub attract_turn: u8,
+    pub demo_stage: u8,
+    /// An actor clobbered `RunActors`' pointer (`loc_A212`): the rest of the slots
+    /// don't run this frame.
+    pub actors_derailed: bool,
 }
 
 impl Engine {
@@ -1328,6 +1349,11 @@ impl Engine {
             options: DEFAULT_OPTIONS,
             plane_a_buffer: vec![0; 0x700],
             use_plane_a_buffer: false,
+            misc_buffer: vec![],
+            word_112c: 0,
+            attract_turn: 0,
+            demo_stage: 0,
+            actors_derailed: false,
             unported_extra: None,
             dma_queue: vec![],
             difficulty_option: 0,
@@ -1589,6 +1615,9 @@ impl Engine {
                 Actor::PasswordEntry(p) => self.run_password_entry(p, inputs).map(Actor::PasswordEntry),
                 Actor::PasswordSprite(s) => self.run_password_sprite(s).map(Actor::PasswordSprite),
                 Actor::PasswordColors(c) => self.run_password_colors(c).map(Actor::PasswordColors),
+                Actor::PrologueControl => self.run_prologue_control(inputs).then_some(Actor::PrologueControl),
+                Actor::Dissolve(d) => self.run_dissolve(d).map(Actor::Dissolve),
+                Actor::CoinSign => None,
                 Actor::DefeatSounds(s) => self.run_defeat_sounds(s).map(Actor::DefeatSounds),
                 Actor::DefeatShip(s) => self.run_defeat_ship(s).map(Actor::DefeatShip),
                 Actor::DefeatPiece(p) => self.run_defeat_piece(p).map(Actor::DefeatPiece),
@@ -1627,6 +1656,9 @@ impl Engine {
                 Actor::NameEntry(n) => self.run_name_entry(n, inputs).map(Actor::NameEntry),
             };
             self.slots[slot] = next;
+            if std::mem::take(&mut self.actors_derailed) {
+                break;
+            }
         }
         self.current_slot = usize::MAX;
         Ok(())

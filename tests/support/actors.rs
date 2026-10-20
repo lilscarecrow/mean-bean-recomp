@@ -767,6 +767,9 @@ fn load_stage(ram: &Ram, a: u32, code: u32) -> Option<Actor> {
             tick_b: ram.u8(a + 0x2A),
             step_b: ram.u8(a + 0x2B),
         }),
+        PROLOGUE_CONTROL_CODE => Actor::PrologueControl,
+        0xDE0E => Actor::CoinSign,
+        0xA212 | 0xA25C => Actor::Dissolve(Dissolve { second: code == 0xA25C, step: ram.u16(a + 0x28) }),
         MENU_CLOUDS_CODE => Actor::MenuClouds(MenuClouds { count: ram.u16(a + 0x26) }),
         0xC28A | 0xC2B0 | 0xC2C4 | 0xC38C | 0xC3C8 | 0xC3CE => Actor::TableNameEntry(TableNameEntry {
             phase: match code {
@@ -887,16 +890,18 @@ fn load_stage(ram: &Ram, a: u32, code: u32) -> Option<Actor> {
             step: ram.u16(a + 0x26),
             tick: ram.u16(a + 0x28),
         }),
-        0xC66A | 0xC68E | 0xC70A | 0xC710 => Actor::HighScoreTable(HighScoreTable {
+        0xC66A | 0xC68E | 0xC70A | 0xC710 | 0xC744 | 0xC760 => Actor::HighScoreTable(HighScoreTable {
             busy: ram.u8(a + 7) != 0,
             phase: match code {
                 0xC66A => TablePhase::Draw,
                 0xC68E => TablePhase::Slide,
                 0xC70A => TablePhase::Wait,
+                0xC744 => TablePhase::SlideOut,
+                0xC760 => TablePhase::Next,
                 _ => TablePhase::Done,
             },
             scroll: ram.u16(a + 0x26),
-            delay: if code >= 0xC70A { ram.u16(a + 0x24) } else { 0 },
+            delay: if matches!(code, 0xC70A | 0xC710) { ram.u16(a + 0x24) } else { 0 },
             unnamed: ram.u8(a + 0x0F) != 0,
             released: ram.u8(a + 0x2A) != 0,
         }),
@@ -1134,6 +1139,9 @@ pub fn describe(actor: &Actor) -> String {
         Actor::MainMenu(m) => format!("{m:X?}"),
         Actor::MenuClouds(c) => format!("{c:X?}"),
         Actor::Options(o) => format!("{o:X?}"),
+        Actor::PrologueControl => "prologue control".into(),
+        Actor::CoinSign => "coin sign".into(),
+        Actor::Dissolve(d) => format!("{d:X?}"),
         Actor::PasswordEntry(p) => format!("{p:X?}"),
         Actor::PasswordSprite(s) => format!("{s:X?}"),
         Actor::PasswordColors(c) => format!("{c:X?}"),

@@ -212,7 +212,7 @@ impl Engine {
     }
 
     /// `sub_F13A`.
-    fn spawn_lair_parts(&mut self) {
+    pub(super) fn spawn_lair_parts(&mut self) {
         for (i, kind) in LAIR_CODES.into_iter().enumerate() {
             let Some(slot) = self.find_actor_slot() else { continue };
             let at = LAIR_PARTS + i as u32 * 10;

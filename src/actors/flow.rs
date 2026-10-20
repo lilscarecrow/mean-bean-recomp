@@ -186,6 +186,7 @@ impl Engine {
             0xFF_1974 => self.level_transition = value,
             0xFF_FC02 => self.sound_test = value,
             0xFF_013A => self.hblank_lines = value,
+            0xFF_1964 if value as u8 == 0 => self.level_mode = (value >> 8) as u8,
             0xFF_0112 => {
                 self.level = (value >> 8) as u8;
                 self.opponent = value as u8;
@@ -217,7 +218,7 @@ impl Engine {
 
     /// The routines `BRUN` calls on the way between matches.
     fn run_routine(&mut self, at: u32, inputs: &Inputs) -> Result<(), Unported> {
-        if self.run_title_routine(at) || self.run_password_routine(at) || self.run_options_routine(at) || self.run_menu_routine(at) || self.run_game_over_routine(at) || self.run_high_score_routine(at) || self.run_finale_routine(at) || self.run_credits_routine(at) || self.run_epilogue_routine(at) || self.run_intro_routine(at)? {
+        if self.run_title_routine(at) || self.run_attract_routine(at) || self.run_password_routine(at) || self.run_options_routine(at) || self.run_menu_routine(at) || self.run_game_over_routine(at) || self.run_high_score_routine(at) || self.run_finale_routine(at) || self.run_credits_routine(at) || self.run_epilogue_routine(at) || self.run_intro_routine(at)? {
             return Ok(());
         }
         match at {

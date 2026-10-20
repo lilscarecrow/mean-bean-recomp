@@ -249,8 +249,19 @@ impl Engine {
         }
         let cue = self.intro_cue as u8;
         if cue & 0x80 != 0 {
-            // off_A15E: only the laugh (sub_A18A) is cued here.
+            // off_A15E: the prologue's robots (loc_A442) and their dissolving
+            // (sub_A1C2 / sub_A1EA), the laugh (sub_A18A).
             match cue & 0x7F {
+                3 => {
+                    for (x, y, frame, script) in [(0x138u16, 0xF8u16, 0u8, 0xA52Cu32), (0x168, 0x118, 2, 0xA536)] {
+                        let Some(slot) = self.find_actor_slot() else { break };
+                        let anim = Anim { ptr: script, time: 0, frame };
+                        let s = LairSprite { kind: LairKind::Robot, draw: 0x80, mappings: 0x28, anim, x, y, count: 0 };
+                        self.slots[slot] = Some(Actor::LairSprite(s));
+                    }
+                }
+                6 => self.spawn_dissolve(false),
+                7 => self.spawn_dissolve(true),
                 8 => {
                     r.ptr = ROBOTNIK_LAUGH;
                     r.time = 0;

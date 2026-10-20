@@ -308,7 +308,12 @@ impl Engine {
                 return Some(s);
             }
             IntroScriptState::Ending => {
-                self.bytecode_disabled = false;
+                // (the game's prologue, opponent $10, tells its controller by clearing it)
+                if self.opponent == 0x10 {
+                    self.opponent = 0;
+                } else {
+                    self.bytecode_disabled = false;
+                }
                 return None;
             }
             IntroScriptState::Run => {}

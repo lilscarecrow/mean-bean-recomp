@@ -97,6 +97,10 @@ fn flow_from(e: &mut Engine, ram: &Ram) {
     e.options = ram.bytes(0xFF_FCA4, 9).try_into().unwrap();
     e.swap_controls = ram.u8(0xFF_1966);
     e.use_plane_a_buffer = ram.u16(0xFF_1956) != 0;
+    e.word_112c = ram.u16(0xFF_112C);
+    e.attract_turn = ram.u8(0xFF_1970);
+    e.demo_stage = ram.u8(0xFF_1971);
+    e.misc_buffer = ram.bytes(0xFF_6800, 0x2000).to_vec();
     e.plane_a_buffer = (0..0x700).map(|i| ram.u16(0xFF_C000 + i * 2)).collect();
     e.text_tick = ram.u8(0xFF_1128);
     e.hblank_count = ram.u16(0xFF_5000);
@@ -126,6 +130,7 @@ struct FlowSnap {
     defeated: [u8; 18],
     options: [u8; 9],
     menu: (u8, bool),
+    attract: (u8, u8),
 }
 
 fn flow_snap(e: &Engine) -> FlowSnap {
@@ -144,6 +149,7 @@ fn flow_snap(e: &Engine) -> FlowSnap {
         defeated: e.opponents_defeated,
         options: e.options,
         menu: (e.last_mode, e.use_plane_a_buffer),
+        attract: (e.attract_turn, e.demo_stage),
     }
 }
 
@@ -163,6 +169,7 @@ fn flow_snap_ram(ram: &Ram) -> FlowSnap {
         defeated: ram.bytes(0xFF_0116, 18).try_into().unwrap(),
         options: ram.bytes(0xFF_FCA4, 9).try_into().unwrap(),
         menu: (ram.u8(0xFF_0105), ram.u16(0xFF_1956) != 0),
+        attract: (ram.u8(0xFF_1970), ram.u8(0xFF_1971)),
     }
 }
 
@@ -565,7 +572,9 @@ fn run_from(
                     run.split += 1;
                     continue;
                 }
-                let next = long_code.and_then(|_| {
+                // (or it ended, and the next frame was cut too: at the same actor if that's
+                // a long step, else wherever the rest of the frame matches)
+                let next_frame = |k: usize, exact: bool| {
                     let mut t = before.clone();
                     for _ in 1..seen + vblanks {
                         t.vblank();
@@ -575,20 +584,33 @@ fn run_from(
                     t.run_bytecode(&inputs).ok()?;
                     t.long_step();
                     t.long_actor = None;
-                    t.run_slots(0..cut, &inputs).ok()?;
-                    match mismatch_except(&t, cur, Some(cut)) {
-                        None => Some(Ok(t)),
-                        Some(m2) => Some(Err(m2)),
-                    }
-                });
-                let t = match next {
-                    Some(Ok(t)) => t,
-                    Some(Err(m2)) => return Err(format!("frame {f}, finishing a split frame at slot {cut:X}: {m}
-(or into the next long step: {m2})")),
-                    None => return Err(format!("frame {f}, finishing a split frame at slot {cut:X}: {m}")),
+                    t.run_slots(0..k, &inputs).ok()?;
+                    let ok = if exact { mismatch(&t, cur).is_none() } else { mismatch_except(&t, cur, Some(k)).is_none() };
+                    ok.then_some((k, t))
+                };
+                let next = match long_code {
+                    Some(_) => next_frame(cut, false),
+                    None => (0..SLOTS).find_map(|k| next_frame(k, true)).or_else(|| (0..SLOTS).rev().find_map(|k| next_frame(k, false))),
+                };
+                let Some((k, t)) = next else {
+                    // (what the same cut into the next frame disagrees on, for debugging)
+                    let probe = {
+                        let mut t = before.clone();
+                        for _ in 1..seen + vblanks {
+                            t.vblank();
+                        }
+                        let _ = t.run_slots(cut..SLOTS, &inputs);
+                        t.vblank();
+                        let _ = t.run_bytecode(&inputs);
+                        t.long_step();
+                        let _ = t.run_slots(0..cut, &inputs);
+                        mismatch_except(&t, cur, Some(cut))
+                    };
+                    return Err(format!("frame {f}, finishing a split frame at slot {cut:X}: {m}
+(into the next frame: {probe:?})"));
                 };
                 engine = t;
-                finishing = Some((cut, 0, Some(cur.code(slot_addr(cut)))));
+                finishing = Some((k, 0, long_code.map(|_| cur.code(slot_addr(k)))));
                 run.split += 1;
                 continue;
             }
@@ -692,7 +714,7 @@ fn run_from(
             match cut {
                 Some((cut, t)) => {
                     if std::env::var("MBM_CUT_DEBUG").is_ok() {
-                        eprintln!("frame {f}: split at slot {cut:X}");
+                        eprintln!("frame {f}: split at slot {cut:X} (for: {m})");
                     }
                     let long_code = (long == Some(cut)).then(|| cur.code(slot_addr(cut)));
                     engine = t;
@@ -834,6 +856,12 @@ fn start_from_settings(all: &[Ram], s: usize, poked: &std::collections::HashSet<
         return Ok(Start::Stopped("no GenPuyoOrder found".into()));
     };
     if (g - 1..=s).any(|f| poked.contains(&f)) || all[g - 1].actors().any(|a| used(&all[g - 1], slot_of(a))) {
+        return Ok(Start::Skipped);
+    }
+    // (the demo's setup frame is long, and where its vertical blanks fall among the
+    // shuffle's and the pairs' draws can't be told: the demo is checked from its first
+    // match frame by the whole-match test)
+    if all[g - 1].u8(0xFF_1964) & 4 != 0 {
         return Ok(Start::Skipped);
     }
     let opponent = all[g - 1].u8(0xFF_0113);
