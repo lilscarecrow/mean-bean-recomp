@@ -1,4 +1,4 @@
-//! The actors around the two fields during a match: the next-pair holders and their
+﻿//! The actors around the two fields during a match: the next-pair holders and their
 //! preview beans, the referee bean in the middle (its intro releases both players), the
 //! start sparkles, the background animator, the opponent portrait and the "danger"
 //! effect when the CPU's field fills up. Their drawing isn't ported; their timing,
@@ -523,13 +523,13 @@ impl Engine {
         p.shown = p.shown.wrapping_add(1);
         p.wait = time as u8;
         p.map = rom::long(at);
-        self.portrait_map = Some(p.map); // EniDec queues it for the vertical blank
+        self.eni_dec(p.map, 0xE400, 9, 6, 0xC61E); // queued for the vertical blank
         p.next = at + 4;
         Some(p)
     }
 
     /// `FadeToPalette` (8 steps) / `FadeToPal_StepCount` (`steps & 7` + 1 steps).
-    fn fade_palette(&mut self, line: u16, speed: u8, steps: u16, target: &[u16; 16]) {
+    pub(super) fn fade_palette(&mut self, line: u16, speed: u8, steps: u16, target: &[u16; 16]) {
         let Some(slot) = self.find_actor_slot() else { return };
         let line = line & 3;
         let generation = &mut self.pal_fade_gen[usize::from(line)];

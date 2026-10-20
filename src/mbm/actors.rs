@@ -22,6 +22,8 @@ use super::rng::Rng;
 
 mod draw;
 mod ending;
+mod flow;
+mod opponent;
 mod palette;
 mod panel;
 mod setup;
@@ -29,6 +31,8 @@ mod sprite;
 mod stage;
 pub use draw::*;
 pub use ending::*;
+pub use flow::*;
+pub use opponent::*;
 pub use palette::*;
 pub use panel::*;
 pub use sprite::*;
@@ -126,6 +130,9 @@ pub enum Actor {
     ShakeField(ShakeField),
     NameEntry(NameEntry),
     RobotnikVoice(RobotnikVoice),
+    FlowWait(FlowWait),
+    OpponentScreen(OpponentScreen),
+    OpponentPortraits(OpponentPortraits),
 }
 
 impl Actor {
@@ -176,6 +183,9 @@ impl Actor {
             Actor::CoconutsLight(c) => Some(if c.started { COCONUTS_LIGHT_CODE } else { 0x6954 }),
             Actor::FfuzzyEyes(_) => Some(FFUZZY_EYES_CODE),
             Actor::RobotnikVoice(v) => Some(v.code()),
+            Actor::FlowWait(w) => Some(w.code()),
+            Actor::OpponentScreen(s) => Some(if s.started { OPPONENT_SCREEN_CODE } else { 0xD6A8 }),
+            Actor::OpponentPortraits(p) => Some(p.code()),
             Actor::FfuzzyPalette(p) => Some(if p.started { FFUZZY_PALETTE_CODE } else { 0x6E46 }),
             Actor::PaletteFade(_) => Some(PALETTE_FADE_CODE),
             Actor::Star(s) => Some(s.state.code()),
@@ -982,7 +992,30 @@ pub struct Engine {
     /// `vscroll_buffer`: per 2-cell column, plane A's and plane B's vertical scroll
     /// (the vertical blank copies it to VSRAM).
     pub vscroll: [u16; 40],
-    pub portrait_map: Option<u32>,
+    /// `eni_tilemap_buffer` (words) and `eni_tilemap_queue` (width - 1, height - 1, plane
+    /// address), copied to the planes in the vertical blank.
+    pub eni_buffer: Vec<u16>,
+    pub eni_queue: Vec<(u16, u16, u16)>,
+    /// The game flow: `bytecode_addr`, `bytecode_disabled` (the flag is
+    /// `bytecode_flag`), and what it does to the VDP for the front end.
+    pub bytecode_pc: u32,
+    pub bytecode_disabled: bool,
+    /// Vertical blanks that come in the middle of this logic frame (when its art
+    /// decompression outlasts a video frame): taken at its first long step. Only the
+    /// tests set it, from the original's timing.
+    pub deferred_vblanks: u16,
+    pub vdp_events: Vec<VdpEvent>,
+    /// `vdp_reg_0`.. (the register mirror), `hscroll_buffer` (planes A and B).
+    pub vdp_regs: [u8; 0x13],
+    pub hscroll: [u16; 2],
+    /// `pressed_time`/`unpressed_time`, `word_FF1122` (buttons ignored while set),
+    /// `level_transition_flag`, `byte_FF0115` (the last match's winner),
+    /// `opponents_defeated` (by opponent).
+    pub repeat_times: (u8, u8),
+    pub input_lock: u16,
+    pub level_transition: u16,
+    pub last_winner: u8,
+    pub opponents_defeated: [u8; 18],
     /// `difficulty` (the option: 0-3) and `byte_FF0114` (stages the time bonus allows for).
     pub difficulty_option: u8,
     pub bonus_level: u8,
@@ -1047,7 +1080,19 @@ impl Engine {
             plane_writes: vec![],
             panel_commands: vec![],
             vscroll: [0; 40],
-            portrait_map: None,
+            eni_buffer: vec![0; 0x800],
+            eni_queue: vec![],
+            bytecode_pc: 0,
+            bytecode_disabled: true,
+            deferred_vblanks: 0,
+            vdp_events: vec![],
+            vdp_regs: [0; 0x13],
+            hscroll: [0; 2],
+            repeat_times: (8, 2),
+            input_lock: 0,
+            level_transition: 0,
+            last_winner: 0,
+            opponents_defeated: [0; 18],
             difficulty_option: 0,
             bonus_level: 0,
             bytecode_flag: 0,
@@ -1144,7 +1189,21 @@ impl Engine {
     /// One frame: every actor in slot order (`RunActors`).
     pub fn frame(&mut self, inputs: &Inputs) -> Result<(), Unported> {
         self.vblank();
+        self.logic(inputs)
+    }
+
+    /// A frame's logic after its vertical blank: the game flow, then the actors.
+    pub fn logic(&mut self, inputs: &Inputs) -> Result<(), Unported> {
+        self.run_bytecode(inputs)?;
+        self.long_step();
         self.run_slots(0..SLOTS, inputs)
+    }
+
+    /// A long step of the logic (decompression): the vertical blanks it outlasts.
+    pub fn long_step(&mut self) {
+        for _ in 0..std::mem::take(&mut self.deferred_vblanks) {
+            self.vblank();
+        }
     }
 
     /// The vertical blank before a frame's logic: queued plane commands, then one
@@ -1214,6 +1273,9 @@ impl Engine {
                 Actor::CoconutsLight(c) => self.run_coconuts_light(c).map(Actor::CoconutsLight),
                 Actor::FfuzzyEyes(e) => self.run_ffuzzy_eyes(e).map(Actor::FfuzzyEyes),
                 Actor::RobotnikVoice(v) => self.run_voice(v).map(Actor::RobotnikVoice),
+                Actor::FlowWait(w) => self.run_flow_wait(w).map(Actor::FlowWait),
+                Actor::OpponentScreen(s) => self.run_opponent_screen(s, inputs).map(Actor::OpponentScreen),
+                Actor::OpponentPortraits(p) => self.run_opponent_portraits(p).map(Actor::OpponentPortraits),
                 Actor::FfuzzyPalette(p) => self.run_ffuzzy_palette(p).map(Actor::FfuzzyPalette),
                 Actor::PaletteFade(pf) => self.run_palette_fade(pf).map(Actor::PaletteFade),
                 Actor::Star(st) => self.run_star(st).map(Actor::Star),

@@ -173,6 +173,7 @@ impl Engine {
         self.popping = [true, true];
         self.player_flags = [0, 0];
         self.bytecode_flag = p.id ^ 1;
+        self.last_winner = p.id ^ 1; // byte_FF0115
         self.crowding = u16::from(p.id) << 1 | 1;
         self.result_score = 0;
         self.result_beans = 0;
@@ -433,6 +434,7 @@ impl Engine {
             }
             Done | ContinueDone | FinalDone => {
                 self.match_over = true; // bytecode_disabled = 0: the game flow resumes
+                self.bytecode_disabled = false;
                 return Ok(false);
             }
             ContinueWait => {

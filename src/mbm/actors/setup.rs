@@ -21,6 +21,9 @@ const FRANKLY_HOPPERS: u32 = 0x690A;
 const OPP_FRANKLY: u8 = 1;
 const OPP_ARMS: u8 = 3;
 const OPP_COCONUTS: u8 = 7;
+/// `OpponentArt` (longs by opponent) and `loc_67F0`'s lightning art (operand).
+const OPPONENT_ART: u32 = 0x6216;
+const FRANKLY_LIGHTNING: u32 = 0x67F8;
 const OPP_SIR_FFUZZY: u8 = 9;
 const OPP_HUMPTY: u8 = 14;
 
@@ -74,6 +77,10 @@ impl Engine {
         }
         self.time_frames = 0;
         self.time_minutes = 0;
+        // loc_3C40: ClearScroll, then column vertical scroll on.
+        self.vscroll = [0; 40];
+        self.hscroll = [0; 2];
+        self.vdp_regs[0x0B] |= 4;
         self.match_over = false;
         let p1 = self.find_actor_slot().ok_or(Unported("no free actor slot"))?;
         let mut player1 = Player::new(0);
@@ -181,14 +188,24 @@ impl Engine {
         Ok(())
     }
 
+    /// `Level_DrawSmallText`: "STAGE n" and the names (run by the bytecode after loc_6070).
+    pub fn draw_small_text(&mut self) {
+        self.queue_panel(PanelCommand::StageText);
+        self.queue_panel(PanelCommand::Names);
+    }
+
     /// `loc_6070` + `sub_678E`: the opponent's portrait and their stage's actors (the
     /// bytecode runs it, then `RunActors`).
     pub fn start_stage(&mut self) -> Result<(), Unported> {
-        // Level_DrawSmallText runs next in the bytecode; nothing else it queues overlaps.
-        self.queue_panel(PanelCommand::StageText);
-        self.queue_panel(PanelCommand::Names);
         self.portrait_lock = 0;
         self.danger_flash = 0;
+        // The portrait's art (NemDec, interrupts off), and on Frankly's stage his lightning.
+        let art = rom::long(OPPONENT_ART + u32::from(self.opponent) * 4);
+        self.vdp_events.push(VdpEvent { at: self.plane_writes.len(), what: VdpOp::Nemesis { vram: 0x8000, art } });
+        if self.level_mode & 3 == 0 && self.opponent == OPP_FRANKLY {
+            let art = rom::long(FRANKLY_LIGHTNING);
+            self.vdp_events.push(VdpEvent { at: self.plane_writes.len(), what: VdpOp::Nemesis { vram: 0x1E00, art } });
+        }
         // sub_61E0: the portrait's palette on line 3.
         let colors = self.opponent_palette();
         self.load_palette(3, PaletteLoad::Colors(colors));

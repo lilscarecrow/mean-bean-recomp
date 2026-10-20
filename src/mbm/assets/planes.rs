@@ -30,15 +30,21 @@ pub fn list(rom: &Rom, n: u16) -> Vec<u32> {
     (0..u32::from(rom.word(at))).map(|i| rom.long(at + 2 + i * 4)).collect()
 }
 
-/// Runs a map command (bit 31 clear) on `vram`.
+/// Runs a map command (bit 31 clear) on `vram` (match screen planes: $80-byte rows).
 pub fn run_map(rom: &Rom, vram: &mut Vram, cmd: u32) -> Result<(), String> {
+    run_map_rows(rom, vram, cmd, ROW_BYTES)
+}
+
+/// Runs a map command with plane rows `row` bytes apart (`ProcPlaneCommands`' d1, from
+/// the plane width).
+pub fn run_map_rows(rom: &Rom, vram: &mut Vram, cmd: u32, row: u16) -> Result<(), String> {
     if cmd & 0x8000_0000 != 0 {
         return Err(format!("plane command {cmd:08X} is a special routine"));
     }
     let a = cmd;
     let (kind, width, height, dest) = (rom.word(a), rom.byte(a + 2), rom.byte(a + 3), rom.word(a + 4));
-    let mut put = |row: u8, col: u8, word: u16| {
-        let at = dest.wrapping_add(u16::from(row) * ROW_BYTES).wrapping_add(u16::from(col) * 2);
+    let mut put = |r: u8, col: u8, word: u16| {
+        let at = dest.wrapping_add(u16::from(r) * row).wrapping_add(u16::from(col) * 2);
         vram.load(at, &word.to_be_bytes());
     };
     match kind {
@@ -77,7 +83,12 @@ pub fn run_map(rom: &Rom, vram: &mut Vram, cmd: u32) -> Result<(), String> {
 
 /// Runs every map command of list `n`.
 pub fn run_list(rom: &Rom, vram: &mut Vram, n: u16) -> Result<(), String> {
-    list(rom, n).into_iter().try_for_each(|cmd| run_map(rom, vram, cmd))
+    run_list_rows(rom, vram, n, ROW_BYTES)
+}
+
+/// Runs every map command of list `n` with plane rows `row` bytes apart.
+pub fn run_list_rows(rom: &Rom, vram: &mut Vram, n: u16, row: u16) -> Result<(), String> {
+    list(rom, n).into_iter().try_for_each(|cmd| run_map_rows(rom, vram, cmd, row))
 }
 
 /// The match screen's board and background: list 0 (both planes cleared, queued as the

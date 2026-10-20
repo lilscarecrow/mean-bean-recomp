@@ -226,7 +226,9 @@ fn match_screen_matches_vdp_snapshots() {
         assert_eq!(&data[..8], b"VDPSNAP1", "{}", path.display());
         let (ram, vram) = (&data[8..8 + 0x10000], &data[8 + 0x10000..8 + 0x20000]);
         let (level_mode, opponent) = (ram[0x1964], ram[0x0113]);
-        if level_mode != 0 {
+        // (match screens only: a player actor, tag $F1/$F2, is there)
+        let in_match = (0..64).any(|i| matches!(ram[0xE000 + i * 0x40], 0xF1 | 0xF2));
+        if level_mode != 0 || !in_match {
             continue;
         }
         let mut ours = screen::match_vram(&rom, &src, opponent).unwrap();
@@ -294,7 +296,16 @@ fn renderer_matches_emulator_screenshots() {
         return;
     };
     let mut checked = 0;
-    for frame in ["000100", "003900", "007400"] {
+    // Every screenshot in out/vdp with its snapshot (k0_f3: matches and the opponent
+    // screen between them).
+    let mut frames: Vec<String> = std::fs::read_dir(dir.join("out/vdp"))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| e.file_name().into_string().ok()?.strip_prefix("k0_f3_")?.strip_suffix(".rgb").map(String::from))
+        .collect();
+    frames.sort();
+    for frame in &frames {
         let (Ok(snap), Ok(shot)) = (
             std::fs::read(dir.join(format!("out/vdp/k0_f3_{frame}.vdp"))),
             std::fs::read(dir.join(format!("out/vdp/k0_f3_{frame}.rgb"))),

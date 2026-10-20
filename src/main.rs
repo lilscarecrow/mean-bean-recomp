@@ -105,24 +105,25 @@ fn buttons(keys: &ButtonInput<KeyCode>) -> u8 {
 fn step(keys: Res<ButtonInput<KeyCode>>, mut front: ResMut<Front>, mut windows: Query<&mut Window>) {
     let p1 = buttons(&keys);
     front.game.frame([p1, 0]);
-    match front.game.status.clone() {
-        Status::Over { p1_won } => {
-            front.linger += 1;
-            if front.linger > 120 {
-                let level = if p1_won { front.game.level + 1 } else { front.game.level };
-                let score = front.game.engine.result_score;
-                if let Ok(g) = Game::new(level.min(15), DIFFICULTY, if p1_won { score } else { 0 }, seed()) {
-                    front.game = g;
-                }
-                front.linger = 0;
-            }
-        }
-        Status::Stopped(why) => {
+    if let Status::Stopped(why) = front.game.status.clone() {
+        // The flow reached a screen that isn't ported yet (the stage intro, game over):
+        // start the stage it was heading for. LevelEnd has already moved the level on
+        // after a win, and the score carries over.
+        front.linger += 1;
+        if front.linger == 1 {
             if let Ok(mut w) = windows.single_mut() {
-                w.title = format!("Mean Bean Machine - stopped: {why} (not ported yet)");
+                w.title = format!("Mean Bean Machine ({why}: not ported yet)");
             }
         }
-        _ => {}
+        if front.linger > 60 {
+            let e = &front.game.engine;
+            let won = e.last_winner == 0;
+            let score = if won { e.result_score } else { 0 };
+            if let Ok(g) = Game::new(e.level.clamp(3, 15), DIFFICULTY, score, seed()) {
+                front.game = g;
+            }
+            front.linger = 0;
+        }
     }
 }
 

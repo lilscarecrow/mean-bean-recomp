@@ -6,7 +6,6 @@
 //! and records the tile writes in `plane_writes`.
 
 use super::*;
-use crate::mbm::assets::enigma;
 use crate::mbm::rom;
 use crate::mbm::assets::planes::{FIELD_ORIGIN, ROW_BYTES};
 
@@ -24,6 +23,8 @@ pub enum PanelCommand {
     StageText,
     /// $9A: "1P" and "DR R" over the fields.
     Names,
+    /// A `PlaneCmdLists` entry (`QueuePlaneCmdList`), for the front end's VRAM.
+    List(u16),
     /// $84 (`loc_833E`): a frame (0-4) of the loser's field crumbling away: plane B's
     /// ground under the field, and (frame 0) plane A cleared above and below it.
     Wipe { player: u8, frame: u8 },
@@ -56,11 +57,6 @@ const SCORE_AT: [u16; 2] = [0xCB1E, 0xCC22];
 const SCORE_BASE: [u16; 2] = [0x8500, 0xA500];
 /// `byte_1AF64`: the tiles of the score buffer's special bytes ($80 blank, $81 "x").
 const SPECIAL_TILES: [u8; 2] = [0, 0x4A];
-/// The portrait (`loc_6070`): its maps go to $C61E, tiles from VRAM $8000 on palette
-/// line 3, 10 x 7 cells.
-const PORTRAIT_AT: u16 = 0xC61E;
-const PORTRAIT_BASE: u16 = 0xE400;
-const PORTRAIT_SIZE: (usize, usize) = (10, 7);
 /// `sub_72CA`'s entry once the banner is open: "YOU WIN" (blinking).
 pub const WIN_TEXT: u8 = 0x0C;
 /// `byte_1B0DA`: the crumbling ground by level (3 = the lessons' board), and
@@ -113,6 +109,10 @@ impl Engine {
                     self.small_text(0xC22A, 0xA500, STR_DR_R, 4);
                 }
                 PanelCommand::Wipe { player, frame } => self.draw_wipe(player, frame),
+                PanelCommand::List(list) => {
+                    let row = self.plane_row();
+                    self.vdp_events.push(VdpEvent { at: self.plane_writes.len(), what: VdpOp::PlaneList { list, row } });
+                }
                 PanelCommand::Time(secs) => {
                     self.result_line(0);
                     self.result_line(1);
@@ -133,9 +133,7 @@ impl Engine {
                 }
             }
         }
-        if let Some(map) = self.portrait_map.take() {
-            self.draw_portrait(map);
-        }
+        self.run_eni_queue();
     }
 
     fn player_by_id(&self, id: u8) -> Option<&Player> {
@@ -362,16 +360,6 @@ impl Engine {
         }
     }
 
-    /// `ProcEniTilemapQueue` for the portrait's map (decoded by `sub_60F4`).
-    fn draw_portrait(&mut self, map: u32) {
-        let Some(rom) = rom::get() else { return };
-        let Ok((words, _)) = enigma::decompress(&rom[map as usize..], PORTRAIT_BASE) else { return };
-        let (w, h) = PORTRAIT_SIZE;
-        for (i, &word) in words.iter().take(w * h).enumerate() {
-            let at = PORTRAIT_AT + (i / w) as u16 * ROW_BYTES + (i % w) as u16 * 2;
-            self.plane_writes.push((at, word));
-        }
-    }
 }
 
 /// `sub_1B350`: a score as 8 digits (leading zeros shown).
