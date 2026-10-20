@@ -8,7 +8,7 @@ mod support;
 
 use std::path::PathBuf;
 
-use bean_machine::mbm::assets::{enigma, nemesis, sorcery};
+use bean_machine::assets::{enigma, nemesis, sorcery};
 
 fn workspace() -> Option<PathBuf> {
     let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../bean-machine-re");
@@ -40,7 +40,7 @@ fn decoders_match_the_disassemblys_decompressed_art() {
     if !support::install_rom() {
         return;
     }
-    let rom = bean_machine::mbm::rom::get().unwrap();
+    let rom = bean_machine::rom::get().unwrap();
     let disasm = dir.join("drmbm-md-disasm");
     let (mut nem, mut sor, mut eni) = (0, 0, 0);
     let mut failures = vec![];
@@ -88,7 +88,7 @@ fn enigma_matches_the_games_decoder() {
     if !support::install_rom() {
         return;
     }
-    let rom = bean_machine::mbm::rom::get().unwrap();
+    let rom = bean_machine::rom::get().unwrap();
     let long = |a: u32| u32::from_be_bytes(rom[a as usize..a as usize + 4].try_into().unwrap());
     let mut checked = 0;
     for path in support::recordings() {
@@ -122,11 +122,11 @@ fn enigma_matches_the_games_decoder() {
 /// left out) along with the layer bytes.
 #[test]
 fn sprite_mappings_match_draw_actors() {
-    use bean_machine::mbm::assets::{sprites, Rom};
+    use bean_machine::assets::{sprites, Rom};
     if !support::install_rom() {
         return;
     }
-    let rom = Rom(bean_machine::mbm::rom::get().unwrap());
+    let rom = Rom(bean_machine::rom::get().unwrap());
     let (mut frames_checked, mut sprites_checked, mut skipped) = (0, 0, 0);
     for path in support::recordings() {
         for ram in support::frames(&path) {
@@ -189,11 +189,11 @@ fn sprite_mappings_match_draw_actors() {
 /// cycling color).
 #[test]
 fn palette_lines_are_rom_palettes() {
-    use bean_machine::mbm::assets::{palette, Rom};
+    use bean_machine::assets::{palette, Rom};
     if !support::install_rom() {
         return;
     }
-    let rom = Rom(bean_machine::mbm::rom::get().unwrap());
+    let rom = Rom(bean_machine::rom::get().unwrap());
     let table: Vec<[u16; 16]> = (0..=255u8).map(|i| palette::from_table(&rom, i)).collect();
     let (mut lines, mut matched) = (0, 0);
     for path in support::recordings() {
@@ -225,7 +225,7 @@ fn palette_lines_are_rom_palettes() {
 /// them (line 3's color 14 aside: the portrait cycles it).
 #[test]
 fn match_screen_matches_vdp_snapshots() {
-    use bean_machine::mbm::assets::{planes, screen, Rom, RomAssets};
+    use bean_machine::assets::{planes, screen, Rom, RomAssets};
     let Some(dir) = workspace() else {
         eprintln!("skipping: no ../bean-machine-re");
         return;
@@ -233,7 +233,7 @@ fn match_screen_matches_vdp_snapshots() {
     if !support::install_rom() {
         return;
     }
-    let rom = Rom(bean_machine::mbm::rom::get().unwrap());
+    let rom = Rom(bean_machine::rom::get().unwrap());
     let src = RomAssets::new().unwrap();
     let mut snaps: Vec<PathBuf> = std::fs::read_dir(dir.join("out/vdp")).into_iter().flatten().flatten().map(|e| e.path()).collect();
     snaps.retain(|p| p.extension().is_some_and(|x| x == "vdp"));
@@ -308,7 +308,7 @@ fn match_screen_matches_vdp_snapshots() {
 /// itself; every pixel must then agree with them.
 #[test]
 fn renderer_matches_emulator_screenshots() {
-    use bean_machine::mbm::render::{self, Layout};
+    use bean_machine::render::{self, Layout};
     let Some(dir) = workspace() else {
         eprintln!("skipping: no ../bean-machine-re");
         return;

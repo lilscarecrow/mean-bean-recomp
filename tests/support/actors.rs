@@ -1,11 +1,11 @@
 //! Rebuilding the port's actors from the ROM's RAM, and describing both the same way
 //! so they can be compared slot by slot.
 
-use bean_machine::mbm::actors::*;
-use bean_machine::mbm::anim::Anim;
-use bean_machine::mbm::motion::Motion;
-use bean_machine::mbm::pair::Pair;
-use bean_machine::mbm::BeanColor;
+use bean_machine::actors::*;
+use bean_machine::anim::Anim;
+use bean_machine::motion::Motion;
+use bean_machine::pair::Pair;
+use bean_machine::BeanColor;
 
 use super::Ram;
 

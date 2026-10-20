@@ -5,7 +5,7 @@
 //! the title screen.
 
 use super::*;
-use crate::mbm::rom;
+use crate::rom;
 
 /// `loc_C66A` (+$26 the slide's scroll, +$0A.. the entries' first name bytes, +$0F set
 /// when one is a new entry still to be named, +$2A set once a button let the flow on).

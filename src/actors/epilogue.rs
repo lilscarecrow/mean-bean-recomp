@@ -5,9 +5,9 @@
 //! mapping is built in RAM, `byte_FF1446`). Then the high score table.
 
 use super::*;
-use crate::mbm::assets::sprites::Piece;
-use crate::mbm::motion;
-use crate::mbm::rom;
+use crate::assets::sprites::Piece;
+use crate::motion;
+use crate::rom;
 
 /// `loc_FAE6`: the fireworks' colors on palette line 2, after $2D0 frames.
 #[derive(Clone, Debug, PartialEq, Eq)]

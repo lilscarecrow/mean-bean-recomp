@@ -2,7 +2,7 @@
 //! picture). Usage: cargo run --release --example headless -- <rom> <frames> <every> <outdir> [level] [a_from]
 //! (`a_from`: from that frame on, tap A instead: name entry letters, the game over countdown).
 //! `MBM_START_PC=1FC4` starts the game flow at that bytecode address instead (the ending).
-use bean_machine::mbm::{game::Game, rom};
+use bean_machine::{game::Game, rom};
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -19,9 +19,9 @@ fn main() {
     for f in 0..frames {
         // Hold nothing; tap down now and then so pairs come down.
         let p1 = if f >= a_from {
-            if f % 16 == 0 { bean_machine::mbm::pad::A } else { 0 }
+            if f % 16 == 0 { bean_machine::pad::A } else { 0 }
         } else if f % 4 == 0 {
-            bean_machine::mbm::pad::DOWN
+            bean_machine::pad::DOWN
         } else {
             0
         };

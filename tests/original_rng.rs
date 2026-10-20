@@ -2,8 +2,8 @@
 
 mod support;
 
-use bean_machine::mbm::bean_order::ORDER_LEN;
-use bean_machine::mbm::{gen_bean_orders, Rng};
+use bean_machine::bean_order::ORDER_LEN;
+use bean_machine::{gen_bean_orders, Rng};
 use support::{addr, frames, recordings};
 
 /// More RNG calls than the game ever makes in one frame (bean order setup uses 257).

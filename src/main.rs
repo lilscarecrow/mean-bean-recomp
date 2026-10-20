@@ -7,8 +7,8 @@
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use bean_machine::mbm::game::{Game, Status};
-use bean_machine::mbm::{pad, render, rom};
+use bean_machine::game::{Game, Status};
+use bean_machine::{pad, render, rom};
 use bevy::asset::RenderAssetUsages;
 use bevy::image::ImageSampler;
 use bevy::prelude::*;

@@ -7,7 +7,7 @@
 //! machine falls after it (`loc_CBBC`) and drags him off screen.
 
 use super::*;
-use crate::mbm::rom;
+use crate::rom;
 
 /// `loc_CB52`: three sounds $82, $82 and $C8 frames apart.
 #[derive(Clone, Debug, PartialEq, Eq)]

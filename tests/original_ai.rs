@@ -10,8 +10,8 @@
 
 mod support;
 
-use bean_machine::mbm::ai::{self, off, AiField};
-use bean_machine::mbm::rng::Rng;
+use bean_machine::ai::{self, off, AiField};
+use bean_machine::rng::Rng;
 use support::{frames, recordings, Ram, FIELD, P1, P2};
 
 fn field_bytes(ram: &Ram, player: usize) -> AiField {
@@ -243,7 +243,7 @@ fn planner_matches_the_original() {
 /// the ROM's cell high bytes and group marks wherever the AI reads them.
 #[test]
 fn rendered_ai_field_matches_the_original() {
-    use bean_machine::mbm::field::Field;
+    use bean_machine::field::Field;
     let mut checked = 0;
     for path in recordings() {
         let poked = support::poked_frames(&path);

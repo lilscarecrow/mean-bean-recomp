@@ -13,8 +13,8 @@
 //! Not ported yet: the last stage's lair intro (`use_lair_background`).
 
 use super::*;
-use crate::mbm::assets::nemesis;
-use crate::mbm::rom;
+use crate::assets::nemesis;
+use crate::rom;
 
 /// `ActLevelIntro`: the script (+$32), the wait (+$26), the box (+$07 shown, +$12 its
 /// plane address, +$0E/+$10 size in characters and lines, +$0A/+$0C the cursor).

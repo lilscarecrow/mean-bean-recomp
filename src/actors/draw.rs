@@ -6,7 +6,7 @@
 //! last drawn copies, and records the tile writes in `plane_writes` for a renderer.
 
 use super::*;
-use crate::mbm::assets::planes::{cell_words, FIELD_ORIGIN, ROW_BYTES};
+use crate::assets::planes::{cell_words, FIELD_ORIGIN, ROW_BYTES};
 
 /// The cell bytes of one field (14 rows x 6): the high byte of each cell word, and the
 /// low byte `sub_5782` keeps as "last drawn" ($FF: not drawn since the field was reset).
@@ -126,7 +126,7 @@ impl Engine {
         let group = if color == BeanColor::Garbage { 3 } else { ((color as usize) >> 1) & 3 };
         let frame = BOUNCE_FRAMES[group][usize::from(bounce)];
         let byte = if color == BeanColor::Garbage { 0xED } else { (color as u8) << 4 | frame };
-        let tile = crate::mbm::assets::planes::cell_pattern(byte);
+        let tile = crate::assets::planes::cell_pattern(byte);
         let at = FIELD_ORIGIN[player]
             .wrapping_add((b.row as u16).wrapping_sub(2).wrapping_mul(0x100))
             .wrapping_add(b.col as u16 * 4)

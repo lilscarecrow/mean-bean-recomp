@@ -55,7 +55,7 @@ pub fn get() -> Option<&'static [u8]> {
 /// A byte of the installed ROM. Panics if none is installed: callers that can run
 /// without one check [`get`] first.
 pub fn byte(addr: u32) -> u8 {
-    get().expect("this needs the ROM (mbm::rom::install)")[addr as usize]
+    get().expect("this needs the ROM (rom::install)")[addr as usize]
 }
 
 pub fn word(addr: u32) -> u16 {

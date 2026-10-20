@@ -7,8 +7,8 @@
 //! a band lower down scrolls left, and the text's last color cycles.
 
 use super::*;
-use crate::mbm::motion;
-use crate::mbm::rom;
+use crate::motion;
+use crate::rom;
 
 /// `sub_DAC8` (+$26 frames to the next digit, +$28 the digit, +$2A the color cycle).
 #[derive(Clone, Debug, PartialEq, Eq)]

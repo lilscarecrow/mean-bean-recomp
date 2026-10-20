@@ -3,8 +3,8 @@
 
 mod support;
 
-use bean_machine::mbm::field::Field;
-use bean_machine::mbm::BeanColor;
+use bean_machine::field::Field;
+use bean_machine::BeanColor;
 use support::{frames, recordings, Ram, GARBAGE_DATA, P1, P2};
 
 const GARBAGE_POINTS: u32 = 70;

@@ -10,7 +10,7 @@
 //! (`sub_A2C8`).
 
 use super::*;
-use crate::mbm::rom;
+use crate::rom;
 
 /// `ActRobotnikIntro` (+$32 its own animation script, +$22 frame time).
 #[derive(Clone, Debug, PartialEq, Eq)]

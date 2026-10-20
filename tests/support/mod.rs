@@ -104,7 +104,7 @@ pub fn install_rom() -> bool {
         std::fs::read_to_string(f).ok().map(|s| PathBuf::from(s.trim()))
     });
     let result = match &path {
-        Some(p) => bean_machine::mbm::rom::install_from(p),
+        Some(p) => bean_machine::rom::install_from(p),
         None => Err("no ROM (set MBM_ROM or write ../bean-machine-re/rom_path.txt)".into()),
     };
     match result {

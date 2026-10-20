@@ -7,10 +7,10 @@
 
 mod support;
 
-use bean_machine::mbm::ai;
-use bean_machine::mbm::anim::Anim;
-use bean_machine::mbm::field::Field;
-use bean_machine::mbm::pair::{Pair, PadInput, RotateKeys, Step};
+use bean_machine::ai;
+use bean_machine::anim::Anim;
+use bean_machine::field::Field;
+use bean_machine::pair::{Pair, PadInput, RotateKeys, Step};
 use support::{frames, recordings, Ram, FRAME_COUNT, P1, P2, P1_CTRL, P1_KEYS, PIVOT_FALLING, PIVOT_LANDING};
 
 static LAG_FRAMES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
@@ -195,7 +195,7 @@ fn cpu_pair_matches_the_original_every_frame() {
             let want = (pair_from(cur, pivot, sat), cpu_plan(cur, player), cur.u8(CPU_READS + u32::from(id)));
             let landed = PIVOT_LANDING.contains(&code_now);
             let attempt = |skip: usize| {
-                let mut rng = bean_machine::mbm::rng::Rng::new(seed);
+                let mut rng = bean_machine::rng::Rng::new(seed);
                 for _ in 0..skip {
                     rng.next();
                 }
@@ -279,7 +279,7 @@ fn cpu_pair_matches_the_original_every_frame() {
 /// same press and auto-repeat bytes and repeat timers every frame.
 #[test]
 fn pad_reading_matches_the_original() {
-    use bean_machine::mbm::pad::Pad;
+    use bean_machine::pad::Pad;
     let mut checked = 0;
     for path in recordings() {
         let mut pad: Option<Pad> = None;

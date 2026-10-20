@@ -5,7 +5,7 @@
 //! slots and random draws are, since those shape the match.
 
 use super::*;
-use crate::mbm::rom;
+use crate::rom;
 
 /// `nullsub_5`: a player's next pairs. +$26..+$2B hold three pairs (the next one
 /// first); +$20's high byte is the place in the bean order; +$1E counts pairs dealt.

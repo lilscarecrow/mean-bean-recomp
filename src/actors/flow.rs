@@ -8,7 +8,7 @@
 //! ported routines by their ROM address; any other stops with `Unported`.
 
 use super::*;
-use crate::mbm::rom;
+use crate::rom;
 
 /// Something the flow does to the VDP, in order with `Engine::plane_writes`: `at` is
 /// how many plane writes came before it.

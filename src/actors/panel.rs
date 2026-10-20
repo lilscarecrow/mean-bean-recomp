@@ -6,8 +6,8 @@
 //! and records the tile writes in `plane_writes`.
 
 use super::*;
-use crate::mbm::rom;
-use crate::mbm::assets::planes::{FIELD_ORIGIN, ROW_BYTES};
+use crate::rom;
+use crate::assets::planes::{FIELD_ORIGIN, ROW_BYTES};
 
 /// A queued plane command that draws part of the panel.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

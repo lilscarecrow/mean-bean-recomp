@@ -6,8 +6,8 @@
 //! but one vertical blank.
 
 use super::*;
-use crate::mbm::bean_order::gen_bean_orders;
-use crate::mbm::rom;
+use crate::bean_order::gen_bean_orders;
+use crate::rom;
 
 /// `unk_3F84`: the scenario speed step each level starts at.
 const LEVEL_SPEED_STEPS: u32 = 0x3F84;

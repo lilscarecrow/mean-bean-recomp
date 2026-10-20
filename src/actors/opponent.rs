@@ -8,8 +8,8 @@
 //! into `eni_tilemap_buffer`, `ProcEniTilemapQueue` copies in the vertical blank).
 
 use super::*;
-use crate::mbm::assets::enigma;
-use crate::mbm::rom;
+use crate::assets::enigma;
+use crate::rom;
 
 /// `ActOpponentScr` (+$26 timer, +$06 draw flags): the sprite is the portrait frame's
 /// flash (mappings $22, frame 1).

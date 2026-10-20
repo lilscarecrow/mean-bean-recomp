@@ -11,11 +11,11 @@
 
 mod support;
 
-use bean_machine::mbm::actors::*;
-use bean_machine::mbm::ai::{off, AiField};
-use bean_machine::mbm::field::Field;
-use bean_machine::mbm::pair::{PadInput, RotateKeys};
-use bean_machine::mbm::Rng;
+use bean_machine::actors::*;
+use bean_machine::ai::{off, AiField};
+use bean_machine::field::Field;
+use bean_machine::pair::{PadInput, RotateKeys};
+use bean_machine::Rng;
 use support::actors::*;
 use support::{frames, recordings, Ram, FRAME_COUNT, P1, P1_CTRL, P1_KEYS, P2};
 
@@ -54,7 +54,7 @@ fn palette_state(ram: &Ram) -> ([[u16; 16]; 4], [Option<PaletteLoad>; 4], [FadeD
     let colors = |at: u32| -> [u16; 16] {
         std::array::from_fn(|c| {
             let a = at + c as u32 * 2;
-            if a >= 0xFF_0000 { ram.u16(a) } else { bean_machine::mbm::rom::word(a) }
+            if a >= 0xFF_0000 { ram.u16(a) } else { bean_machine::rom::word(a) }
         })
     };
     let palettes = std::array::from_fn(|l| colors(BUFFER + l as u32 * 0x20));
@@ -844,11 +844,11 @@ fn matches_start_from_the_settings_alone() {
 /// snapshot frames both fields' plane cells must be the ROM's.
 #[test]
 fn field_planes_match_vdp_snapshots() {
-    use bean_machine::mbm::assets::{planes, screen, Rom, RomAssets, Vram};
+    use bean_machine::assets::{planes, screen, Rom, RomAssets, Vram};
     if !support::install_rom() {
         return;
     }
-    let rom = Rom(bean_machine::mbm::rom::get().unwrap());
+    let rom = Rom(bean_machine::rom::get().unwrap());
     let src = RomAssets::new().unwrap();
     let Some(path) = recordings().into_iter().find(|p| p.ends_with("batch/k0_f3.ramrec") || p.ends_with("batch\\k0_f3.ramrec")) else {
         return;
@@ -878,7 +878,7 @@ fn field_planes_match_vdp_snapshots() {
         planes::match_planes(&rom, &mut vram).unwrap();
         let mut boxes = vec![];
         let mut check = |f: usize, e: &mut Engine, _: &Ram| -> Result<(), String> {
-            bean_machine::mbm::game::apply_vdp(e, &mut vram, &mut boxes, &rom, &src).unwrap();
+            bean_machine::game::apply_vdp(e, &mut vram, &mut boxes, &rom, &src).unwrap();
             let Some(snap) = snaps.get(&f) else { return Ok(()) };
             if !e.slots.iter().flatten().any(|a| matches!(a, Actor::Player(_))) {
                 return Ok(()); // (between matches)
@@ -919,11 +919,11 @@ fn field_planes_match_vdp_snapshots() {
 /// on is applied (fields, centre panel, portrait, the end sequence and results).
 #[test]
 fn screen_planes_match_vdp_snapshots() {
-    use bean_machine::mbm::assets::{Rom, RomAssets};
+    use bean_machine::assets::{Rom, RomAssets};
     if !support::install_rom() {
         return;
     }
-    let rom = Rom(bean_machine::mbm::rom::get().unwrap());
+    let rom = Rom(bean_machine::rom::get().unwrap());
     let src = RomAssets::new().unwrap();
     let (mut run, mut compared) = (Run::default(), 0);
     for path in recordings() {
@@ -949,13 +949,13 @@ fn screen_planes_match_vdp_snapshots() {
 }
 
 fn screen_against(
-    rom: &bean_machine::mbm::assets::Rom,
-    src: &bean_machine::mbm::assets::RomAssets,
+    rom: &bean_machine::assets::Rom,
+    src: &bean_machine::assets::RomAssets,
     path: &std::path::PathBuf,
     snaps: &std::collections::BTreeMap<usize, Vec<u8>>,
     run: &mut Run,
 ) -> usize {
-    use bean_machine::mbm::assets::{planes, screen, Vram};
+    use bean_machine::assets::{planes, screen, Vram};
     let mut compared = 0;
     let all: Vec<Ram> = frames(path).collect();
     let poked = support::poked_frames(path);
@@ -980,7 +980,7 @@ fn screen_against(
         let vram = std::cell::RefCell::new(vram);
         let boxes = std::cell::RefCell::new(vec![]);
         let apply = |e: &mut Engine| {
-            bean_machine::mbm::game::apply_vdp(e, &mut vram.borrow_mut(), &mut boxes.borrow_mut(), rom, src).unwrap();
+            bean_machine::game::apply_vdp(e, &mut vram.borrow_mut(), &mut boxes.borrow_mut(), rom, src).unwrap();
         };
         let started = if from_snapshot {
             engine_from(&all[s]).map(|engine| Start::Running { engine, frame: s, opponent }).map_err(|e| e.to_string())
@@ -1016,7 +1016,7 @@ fn screen_against(
             // screen's planes are 128 cells wide and scroll sideways).
             let mut regs = [0u8; 24];
             regs[..0x13].copy_from_slice(&e.vdp_regs);
-            let layout = bean_machine::mbm::render::Layout::from_registers(&regs);
+            let layout = bean_machine::render::Layout::from_registers(&regs);
             let width = usize::from(layout.plane_width);
             for (plane, base, scroll) in [("A", usize::from(layout.plane_a), e.hscroll[0]), ("B", usize::from(layout.plane_b), e.hscroll[1])] {
                 let mut cols: Vec<usize> = (0..320).map(|x| ((x + 0x400 - usize::from(scroll & 0x3FF)) % (width * 8)) / 8).collect();

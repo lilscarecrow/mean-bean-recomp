@@ -5,11 +5,11 @@
 
 mod support;
 
-use bean_machine::mbm::actors::*;
-use bean_machine::mbm::ai::{off, AiField};
-use bean_machine::mbm::field::Field;
-use bean_machine::mbm::Rng;
-use bean_machine::mbm::pair::{PadInput, RotateKeys};
+use bean_machine::actors::*;
+use bean_machine::ai::{off, AiField};
+use bean_machine::field::Field;
+use bean_machine::Rng;
+use bean_machine::pair::{PadInput, RotateKeys};
 use support::actors::*;
 use support::{frames, recordings, Ram, FRAME_COUNT, P1, P1_CTRL, P1_KEYS, P2};
 

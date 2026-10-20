@@ -5,7 +5,7 @@
 //! with 4 fraction bits, stepped 8 times by an eighth of the distance).
 
 use super::*;
-use crate::mbm::rom;
+use crate::rom;
 
 /// What a line's palette pointer points at when the vertical blank copies it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

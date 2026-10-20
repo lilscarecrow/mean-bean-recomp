@@ -6,7 +6,7 @@
 //! hands control back to the game flow (`bytecode_disabled` cleared).
 
 use super::*;
-use crate::mbm::rom;
+use crate::rom;
 
 /// `unk_7A7C`: per column (left to right), the frames before it falls and its
 /// sideways acceleration.

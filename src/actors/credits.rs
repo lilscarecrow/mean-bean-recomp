@@ -6,7 +6,7 @@
 //! is Has Bean dropping in (`loc_109AC`).
 
 use super::*;
-use crate::mbm::rom;
+use crate::rom;
 
 /// `loc_10834`, a step of the script per code (with `ActorBookmark_SetDelay` waits).
 #[derive(Clone, Debug, PartialEq, Eq)]
