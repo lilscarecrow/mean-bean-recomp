@@ -78,7 +78,13 @@ fn flow_from(e: &mut Engine, ram: &Ram) {
     e.bytecode_pc = ram.u32(0xFF_0A36);
     e.bytecode_disabled = ram.u8(0xFF_0A3B) != 0;
     e.vdp_regs = ram.bytes(0xFF_0A22, 0x13).try_into().unwrap();
-    e.hscroll = [ram.u16(0xFF_0622), ram.u16(0xFF_0624)];
+    e.hscroll = std::array::from_fn(|i| ram.u16(0xFF_0622 + i as u32 * 2));
+    e.use_lair = ram.u8(0xFF_112A);
+    e.intro_cue = ram.u16(0xFF_1990);
+    e.intro_198e = ram.u16(0xFF_198E);
+    e.opponent_x = ram.u16(0xFF_1994);
+    e.intro_pause = ram.u8(0xFF_1126);
+    e.text_tick = ram.u8(0xFF_1128);
     e.repeat_times = (ram.u8(0xFF_1108), ram.u8(0xFF_1109));
     e.input_lock = ram.u16(0xFF_1122);
     e.level_transition = ram.u16(0xFF_1974);
@@ -95,7 +101,8 @@ struct FlowSnap {
     level: u8,
     opponent: u8,
     regs: [u8; 0x13],
-    hscroll: [u16; 2],
+    hscroll: Vec<u16>,
+    intro: (u8, u16, u16, u16, u8, u8),
     repeat: (u8, u8),
     lock: u16,
     transition: u16,
@@ -110,7 +117,8 @@ fn flow_snap(e: &Engine) -> FlowSnap {
         level: e.level,
         opponent: e.opponent,
         regs: e.vdp_regs,
-        hscroll: e.hscroll,
+        hscroll: e.hscroll.to_vec(),
+        intro: (e.use_lair, e.intro_cue, e.intro_198e, e.opponent_x, e.intro_pause, e.text_tick),
         repeat: e.repeat_times,
         lock: e.input_lock,
         transition: e.level_transition,
@@ -126,7 +134,8 @@ fn flow_snap_ram(ram: &Ram) -> FlowSnap {
         level: ram.u8(0xFF_0112),
         opponent: ram.u8(0xFF_0113),
         regs: ram.bytes(0xFF_0A22, 0x13).try_into().unwrap(),
-        hscroll: [ram.u16(0xFF_0622), ram.u16(0xFF_0624)],
+        hscroll: (0..0x200).map(|i| ram.u16(0xFF_0622 + i * 2)).collect(),
+        intro: (ram.u8(0xFF_112A), ram.u16(0xFF_1990), ram.u16(0xFF_198E), ram.u16(0xFF_1994), ram.u8(0xFF_1126), ram.u8(0xFF_1128)),
         repeat: (ram.u8(0xFF_1108), ram.u8(0xFF_1109)),
         lock: ram.u16(0xFF_1122),
         transition: ram.u16(0xFF_1974),
@@ -377,7 +386,9 @@ fn run_from(
     run: &mut Run,
     on_frame: &mut dyn FnMut(usize, &mut Engine, &Ram) -> Result<(), String>,
 ) -> Result<String, String> {
-    let mut finishing: Option<usize> = None;
+    // A frame the ROM's vertical blank cut in the middle of RunActors: the slots left,
+    // and the vertical blanks seen while they haven't run yet (a long actor step).
+    let mut finishing: Option<(usize, u16)> = None;
     // A logic frame whose bytecode run spans several video frames (art decompression):
     // we run it at once, then only the ROM's vertical blanks until it's done.
     let mut pending: Option<(Inputs, u16)> = None;
@@ -415,7 +426,7 @@ fn run_from(
                 });
                 let Some((cut, t)) = cut else { return Err(format!("frame {f} (end of a long bytecode frame): {m}")) };
                 engine = t;
-                finishing = Some(cut);
+                finishing = Some((cut, 0));
                 run.split += 1;
                 continue;
             }
@@ -438,7 +449,17 @@ fn run_from(
             pending = Some((inputs, 0));
             continue;
         }
-        if let Some(cut) = finishing.take() {
+        if let Some((cut, seen)) = finishing.take() {
+            let flow_of = |r: &Ram| (r.u32(0xFF_0A36), r.u8(0xFF_0A3B));
+            let vblanks = cur.u16(FRAME_COUNT).wrapping_sub(prev.u16(FRAME_COUNT));
+            if prev.bytes(0xFF_E000, 0x1000) == cur.bytes(0xFF_E000, 0x1000) && flow_of(prev) == flow_of(cur) {
+                // Still in the long step of the actor at the cut.
+                finishing = Some((cut, seen + vblanks));
+                continue;
+            }
+            for _ in 1..seen + vblanks {
+                engine.vblank();
+            }
             engine.vblank();
             if let Err(Unported(what)) = engine.run_slots(cut..SLOTS, &inputs) {
                 return Ok(format!("frame {f}: {what}"));
@@ -451,7 +472,7 @@ fn run_from(
             continue;
         }
         // (the opponent screen's controller only moves the scroll)
-        let flow_state = |r: &Ram| (r.u32(0xFF_0A36), r.u8(0xFF_0A3B), r.u32(0xFF_0622));
+        let flow_state = |r: &Ram| (r.u32(0xFF_0A36), r.u8(0xFF_0A3B), r.bytes(0xFF_0622, 0x400).to_vec());
         if prev.bytes(0xFF_E000, 0x1000) == cur.bytes(0xFF_E000, 0x1000) && flow_state(prev) == flow_state(cur) {
             // Lag: the vertical blank still ran (clock, plane commands, one Random).
             engine.vblank();
@@ -499,7 +520,9 @@ fn run_from(
         if let Some(m) = mismatch(&engine, cur) {
             // The logic may have overrun the video frame: find where RunActors was cut
             // (between actors, or in the middle of actor `cut`, which then shows half done).
-            let cut = (1..SLOTS).find_map(|cut| {
+            // (MBM_NO_SPLIT: report the mismatch instead, for debugging.)
+            let no_split = std::env::var("MBM_NO_SPLIT").is_ok();
+            let cut = (1..SLOTS).filter(|_| !no_split).find_map(|cut| {
                 let mut t = before.clone();
                 t.vblank();
                 t.run_slots(0..cut, &inputs).ok()?;
@@ -509,7 +532,7 @@ fn run_from(
             match cut {
                 Some((cut, t)) => {
                     engine = t;
-                    finishing = Some(cut);
+                    finishing = Some((cut, 0));
                     run.split += 1;
                 }
                 None => {
@@ -587,7 +610,11 @@ fn whole_matches_run_on_the_engine_alone() {
                     let players = || e.slots.iter().filter_map(|s| if let Some(Actor::Player(p)) = s { Some(p) } else { None });
                     players().count() > 0 && players().all(|p| !matches!(p.state, PlayerState::Setup | PlayerState::WaitReady))
                 });
-            if !mid_match && (!waiting(&all[f]) || (f > 0 && waiting(&all[f - 1])) || poked.contains(&f)) {
+            // And the game flow right after the opponent screen (bytecode at $1D3E, no
+            // actors): the stage intro, the transition, the match after.
+            let at_intro = |r: &Ram| r.u32(0xFF_0A36) == 0x1D3E && r.u8(0xFF_0A3B) == 0 && !r.actors().any(|a| used(r, slot_of(a)));
+            let flow_start = f > 0 && at_intro(&all[f]) && !at_intro(&all[f - 1]) && !poked.contains(&f);
+            if !mid_match && !flow_start && (!waiting(&all[f]) || (f > 0 && waiting(&all[f - 1])) || poked.contains(&f)) {
                 continue;
             }
             matches += 1;
@@ -615,12 +642,6 @@ fn match_setups(all: &[Ram]) -> Vec<usize> {
     (1..all.len()).filter(|&f| p1_at(&all[f], 0x3D80) && !any_p1(&all[f - 1])).collect()
 }
 
-/// `BC_Level`'s palettes from the ROM.
-fn level_palettes() -> [[u16; 16]; 4] {
-    use bean_machine::mbm::assets::{screen, Rom, RomAssets};
-    let rom = Rom(bean_machine::mbm::rom::get().unwrap());
-    screen::level_palettes(&rom, &RomAssets::new().unwrap())
-}
 
 enum Start {
     /// Not a clean start (a scenario poked RAM, or actors left over).
@@ -737,10 +758,9 @@ fn field_planes_match_vdp_snapshots() {
         let Ok(engine) = engine_from(&all[start]) else { continue };
         let mut vram: Vram = screen::match_vram(&rom, &src, engine.opponent).unwrap();
         planes::match_planes(&rom, &mut vram).unwrap();
+        let mut boxes = vec![];
         let mut check = |f: usize, e: &mut Engine, _: &Ram| -> Result<(), String> {
-            for (at, w) in e.plane_writes.drain(..) {
-                vram.load(at, &w.to_be_bytes());
-            }
+            bean_machine::mbm::game::apply_vdp(e, &mut vram, &mut boxes, &rom, &src).unwrap();
             let Some(snap) = snaps.get(&f) else { return Ok(()) };
             if !e.slots.iter().flatten().any(|a| matches!(a, Actor::Player(_))) {
                 return Ok(()); // (between matches)
@@ -821,15 +841,35 @@ fn screen_against(
     let mut compared = 0;
     let all: Vec<Ram> = frames(path).collect();
     let poked = support::poked_frames(path);
-    for s in match_setups(&all) {
+    // Besides the match setups: before the first match, the first frame of the game flow
+    // with no actors that has a snapshot (the VRAM starts as the snapshot's).
+    let setups = match_setups(&all);
+    // (right after the opponent screen's fade: bytecode at $1D3E, nothing queued)
+    let quiet = |r: &Ram| {
+        r.u32(0xFF_0A36) == 0x1D3E && r.u8(0xFF_0A3B) == 0 && r.u8(0xFF_0A3C) != 0 && !r.actors().any(|a| used(r, slot_of(a)))
+    };
+    let flow_start = (1..setups.first().copied().unwrap_or(all.len()))
+        // (and its vertical blank done: the seed moved)
+        .find(|&f| quiet(&all[f]) && snaps.contains_key(&f) && !poked.contains(&f) && all[f].u32(RNG_SEED) != all[f - 1].u32(RNG_SEED));
+    let starts: Vec<(usize, bool)> = flow_start.map(|f| (f, true)).into_iter().chain(setups.iter().map(|&s| (s, false))).collect();
+    for (s, from_snapshot) in starts {
         let opponent = all[s].u8(0xFF_0113);
         let mut vram: Vram = screen::match_vram(rom, src, opponent).unwrap();
         planes::match_planes(rom, &mut vram).unwrap();
+        if from_snapshot {
+            vram.0.copy_from_slice(&snaps[&s][8 + 0x10000..8 + 0x20000]);
+        }
         let vram = std::cell::RefCell::new(vram);
+        let boxes = std::cell::RefCell::new(vec![]);
         let apply = |e: &mut Engine| {
-            bean_machine::mbm::game::apply_vdp(e, &mut vram.borrow_mut(), rom, src).unwrap();
+            bean_machine::mbm::game::apply_vdp(e, &mut vram.borrow_mut(), &mut boxes.borrow_mut(), rom, src).unwrap();
         };
-        let (engine, f) = match start_from_settings(&all, s, &poked, &mut |e| apply(e)) {
+        let started = if from_snapshot {
+            engine_from(&all[s]).map(|engine| Start::Running { engine, frame: s, opponent }).map_err(|e| e.to_string())
+        } else {
+            start_from_settings(&all, s, &poked, &mut |e| apply(e))
+        };
+        let (engine, f) = match started {
             Err(m) => panic!("{}: {m}", path.display()),
             Ok(Start::Running { engine, frame, .. }) => (engine, frame),
             Ok(Start::Stopped(why)) => {
@@ -865,8 +905,10 @@ fn screen_against(
                     }
                 }
             }
-            // On the opponent screen, the art the flow loads (patterns $0000-$B7FF) too.
-            if (0x1CDA..0x1D76).contains(&e.bytecode_pc) || e.slots.iter().flatten().any(|a| matches!(a, Actor::OpponentScreen(_))) {
+            // On the opponent screen and in the intro, the art the flow loads (patterns
+            // $0000-$B7FF) too.
+            let intro = e.slots.iter().flatten().any(|a| matches!(a, Actor::IntroScript(_)));
+            if intro || (0x1CDA..0x1D76).contains(&e.bytecode_pc) || e.slots.iter().flatten().any(|a| matches!(a, Actor::OpponentScreen(_))) {
                 // (tiles $32C-$32F: the refugee bean's animation, which the front end runs)
                 let differs = |t: usize| !(0x32C..0x330).contains(&t) && vram.0[t * 32..t * 32 + 32] != want[t * 32..t * 32 + 32];
                 if let Some(t) = (0..0xB800 / 32).find(|&t| differs(t)) {

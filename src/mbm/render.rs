@@ -24,6 +24,9 @@ pub struct Layout {
     pub shadow_highlight: bool,
     /// Vertical scroll per 2-cell column (register 11 bit 2) instead of whole planes.
     pub column_vscroll: bool,
+    /// Horizontal scroll (register 11 bits 0-1): 0 whole planes, 2 per 8 lines, 3 per
+    /// line (the table holds plane A, plane B words per entry).
+    pub hscroll_mode: u8,
 }
 
 impl Layout {
@@ -44,6 +47,7 @@ impl Layout {
             backdrop: r[7] & 0x3F,
             shadow_highlight: r[12] & 8 != 0,
             column_vscroll: r[11] & 4 != 0,
+            hscroll_mode: r[11] & 3,
         }
     }
 
@@ -101,12 +105,19 @@ fn word(vram: &[u8], at: usize) -> u16 {
 /// plane A then B; or the first two for whole planes).
 pub fn render(layout: &Layout, vram: &[u8], cram: &[u16; 64], vsram: &[u16]) -> Vec<Pixel> {
     let (pw, ph) = (usize::from(layout.plane_width), usize::from(layout.plane_height));
-    let hscroll = |plane: usize| word(vram, usize::from(layout.hscroll) + plane * 2) & 0x3FF;
+    let hscroll = |plane: usize, y: usize| {
+        let entry = match layout.hscroll_mode {
+            3 => y,
+            2 => y & !7,
+            _ => 0,
+        };
+        word(vram, usize::from(layout.hscroll) + entry * 4 + plane * 2) & 0x3FF
+    };
     let plane_cell = |plane: usize, x: usize, y: usize| -> Cell {
         let base = usize::from(if plane == 0 { layout.plane_a } else { layout.plane_b });
         let column = if layout.column_vscroll { (x / 16) * 2 } else { 0 };
         let vs = usize::from(vsram.get(column + plane).copied().unwrap_or(0) & 0x3FF);
-        let px = (x + 0x400 - usize::from(hscroll(plane))) % (pw * 8);
+        let px = (x + 0x400 - usize::from(hscroll(plane, y))) % (pw * 8);
         let py = (y + vs) % (ph * 8);
         let w = word(vram, base + ((py / 8) * pw + px / 8) * 2);
         Cell { index: pattern_pixel(vram, w, px % 8, py % 8), line: ((w >> 13) & 3) as u8, priority: w & 0x8000 != 0 }

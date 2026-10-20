@@ -103,13 +103,15 @@ impl Engine {
         self.vdp_regs[0x0C] |= 8; // EnableSHMode
         self.vdp_regs[0x0B] &= 0xFC; // DisableLineHScroll, then ClearScroll
         self.vscroll = [0; 40];
-        self.hscroll = [0; 2];
+        self.hscroll = [0; 0x200];
         if let Some(slot) = self.find_actor_slot() {
             self.slots[slot] = Some(Actor::OpponentScreen(OpponentScreen { started: false, timer: 0, draw: 0 }));
         }
-        self.hscroll = [0xFF88; 2];
+        self.hscroll[0] = 0xFF88;
+        self.hscroll[1] = 0xFF88;
         if rom::byte(SCROLL_FLAGS + u32::from(self.level)) == 0 && self.last_winner == 0 {
-            self.hscroll = [0xFFF0; 2];
+            self.hscroll[0] = 0xFFF0;
+            self.hscroll[1] = 0xFFF0;
         }
         // DrawOpponentScrBG: the backdrop, 5 x 5 blocks of 13 x 6 tiles.
         let mut tile = rom::word(BG_BASES + u32::from(self.level) * 2);
@@ -140,6 +142,9 @@ impl Engine {
             }
             n >>= 4;
         }
+        // The portraits' NemDec ran with interrupts off; the vertical blanks it held
+        // back come now (and draw the backdrop queued above).
+        self.long_step();
     }
 
     /// `DrawOpponentScrBoxes`: the box frame (its border in front) at each shown box.

@@ -79,7 +79,7 @@ impl Engine {
         self.time_minutes = 0;
         // loc_3C40: ClearScroll, then column vertical scroll on.
         self.vscroll = [0; 40];
-        self.hscroll = [0; 2];
+        self.hscroll = [0; 0x200];
         self.vdp_regs[0x0B] |= 4;
         self.match_over = false;
         let p1 = self.find_actor_slot().ok_or(Unported("no free actor slot"))?;

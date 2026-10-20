@@ -25,6 +25,10 @@ pub enum PanelCommand {
     Names,
     /// A `PlaneCmdLists` entry (`QueuePlaneCmdList`), for the front end's VRAM.
     List(u16),
+    /// The intro's text box: $8C / $9F (Robotnik's colors) save what's under it and
+    /// draw it, $8D puts the plane back, $8E clears its inside. `size` is lines << 5 |
+    /// characters, `at` its plane address.
+    IntroBox { kind: u8, size: u8, at: u16 },
     /// $84 (`loc_833E`): a frame (0-4) of the loser's field crumbling away: plane B's
     /// ground under the field, and (frame 0) plane A cleared above and below it.
     Wipe { player: u8, frame: u8 },
@@ -109,6 +113,7 @@ impl Engine {
                     self.small_text(0xC22A, 0xA500, STR_DR_R, 4);
                 }
                 PanelCommand::Wipe { player, frame } => self.draw_wipe(player, frame),
+                PanelCommand::IntroBox { kind, size, at } => self.draw_intro_box(kind, size, at),
                 PanelCommand::List(list) => {
                     let row = self.plane_row();
                     self.vdp_events.push(VdpEvent { at: self.plane_writes.len(), what: VdpOp::PlaneList { list, row } });
@@ -301,6 +306,40 @@ impl Engine {
                 ch = 0;
             }
             self.name_char(at + i * 2, ch);
+        }
+    }
+
+    /// `SpecPlane8C` / `9F` / `8D` / `8E` (`loc_1A7C4`: d3 = characters + 1, d4 = lines
+    /// * 2).
+    fn draw_intro_box(&mut self, kind: u8, size: u8, at: u16) {
+        let row = self.plane_row();
+        let d3 = u16::from(size & 0x1F) + 1;
+        let d4 = u16::from(size >> 5) * 2;
+        let event = |e: &mut Engine, what: VdpOp| e.vdp_events.push(VdpEvent { at: e.plane_writes.len(), what });
+        match kind {
+            0x8C | 0x9F => {
+                event(self, VdpOp::SaveBox { at, cols: d3 + 1, rows: d4 + 1, row });
+                let base: u16 = if kind == 0x8C { 0xE300 } else { 0xE100 };
+                let (w, h) = (d3 - 2, d4 - 2);
+                for c in 0..=w {
+                    self.plane_writes.push((at.wrapping_add(2 + c * 2), base | 0xF8));
+                }
+                let mut line = at.wrapping_add(row);
+                for _ in 0..=h {
+                    self.plane_writes.push((line, base | 0xFA));
+                    for c in 0..=w {
+                        self.plane_writes.push((line.wrapping_add(2 + c * 2), base | 0xFB));
+                    }
+                    self.plane_writes.push((line.wrapping_add(2 + (w + 1) * 2), base | 0xFC));
+                    line = line.wrapping_add(row);
+                }
+                for c in 0..=w {
+                    self.plane_writes.push((line.wrapping_add(2 + c * 2), base | 0xFE));
+                }
+            }
+            0x8D => event(self, VdpOp::RestoreBox { at, cols: d3 + 1, rows: d4 + 1, row }),
+            // 0x8E: FillPlane from one row and column in.
+            _ => self.fill(at.wrapping_add(0x82), 0x83FB, d3 - 1, d4 - 1),
         }
     }
 

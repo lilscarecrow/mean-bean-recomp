@@ -13,7 +13,8 @@ use super::rng::Rng;
 
 /// Brings `vram` up to date with what the engine did since the last call: its plane
 /// writes and, in order among them, the flow's art loads and plane lists.
-pub fn apply_vdp(e: &mut Engine, vram: &mut Vram, rom: &Rom, src: &dyn AssetSource) -> Result<(), String> {
+/// `boxes` is `plane_a_buffer` (what the intro's text box covers).
+pub fn apply_vdp(e: &mut Engine, vram: &mut Vram, boxes: &mut Vec<u16>, rom: &Rom, src: &dyn AssetSource) -> Result<(), String> {
     let writes: Vec<(u16, u16)> = e.plane_writes.drain(..).collect();
     let mut done = 0;
     for ev in std::mem::take(&mut e.vdp_events) {
@@ -25,6 +26,37 @@ pub fn apply_vdp(e: &mut Engine, vram: &mut Vram, rom: &Rom, src: &dyn AssetSour
             VdpOp::Sorcery { vram: at, art } => vram.load(at, &src.sorcery(art)?),
             VdpOp::Nemesis { vram: at, art } => vram.load(at, &src.nemesis(art)?),
             VdpOp::PlaneList { list, row } => planes::run_list_rows(rom, vram, list, row)?,
+            VdpOp::Font { vram: at, art } => {
+                let mut font = src.nemesis(art)?;
+                font.resize(0x1180, 0);
+                font.iter_mut().for_each(|b| *b |= 0x11);
+                vram.load(at, &font);
+            }
+            VdpOp::RomCopy { vram: at, from, len } => {
+                let from = from as usize;
+                vram.load(at, &rom.0[from..from + usize::from(len)]);
+            }
+            VdpOp::Words { at, words } => {
+                let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_be_bytes()).collect();
+                vram.load(at, &bytes);
+            }
+            VdpOp::SaveBox { at, cols, rows, row } => {
+                boxes.clear();
+                for r in 0..rows {
+                    for c in 0..cols {
+                        let a = usize::from(at.wrapping_add(r * row).wrapping_add(c * 2));
+                        boxes.push(u16::from_be_bytes([vram.0[a], vram.0[(a + 1) & 0xFFFF]]));
+                    }
+                }
+            }
+            VdpOp::RestoreBox { at, cols, rows, row } => {
+                for r in 0..rows {
+                    for c in 0..cols {
+                        let w = boxes.get(usize::from(r * cols + c)).copied().unwrap_or(0);
+                        vram.load(at.wrapping_add(r * row).wrapping_add(c * 2), &w.to_be_bytes());
+                    }
+                }
+            }
         }
     }
     for &(at, w) in &writes[done..] {
@@ -53,6 +85,7 @@ pub struct Game {
     rom: Rom<'static>,
     src: RomAssets,
     vram: Vram,
+    boxes: Vec<u16>,
     pads: [Pad; 2],
     /// `draw_order`: DrawActors walks the slots forwards and backwards on alternate frames.
     backwards: bool,
@@ -90,6 +123,7 @@ impl Game {
             rom,
             src,
             vram,
+            boxes: vec![],
             pads: [Pad::default(); 2],
             backwards: false,
             refugee_frame: 0xFF,
@@ -122,7 +156,7 @@ impl Game {
     }
 
     fn update_vram(&mut self) {
-        if let Err(e) = apply_vdp(&mut self.engine, &mut self.vram, &self.rom, &self.src) {
+        if let Err(e) = apply_vdp(&mut self.engine, &mut self.vram, &mut self.boxes, &self.rom, &self.src) {
             self.status = Status::Stopped(e);
         }
         // SpecPlane8A: the background animator's frame on the refugee bean's tiles.
@@ -137,9 +171,8 @@ impl Game {
         self.build_sprite_table();
         // TransferHScroll: the planes' horizontal scroll.
         let at = self.layout().hscroll;
-        for (i, w) in self.engine.hscroll.iter().enumerate() {
-            self.vram.load(at + i as u16 * 2, &w.to_be_bytes());
-        }
+        let words: Vec<u8> = self.engine.hscroll.iter().flat_map(|w| w.to_be_bytes()).collect();
+        self.vram.load(at, &words);
     }
 
     /// `DrawActors` + `SetSpriteLinks`: the hardware sprite table at $BC00 (entry 0 a

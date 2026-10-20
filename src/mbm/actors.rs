@@ -23,6 +23,8 @@ use super::rng::Rng;
 mod draw;
 mod ending;
 mod flow;
+mod intro;
+mod lair;
 mod opponent;
 mod palette;
 mod panel;
@@ -32,6 +34,8 @@ mod stage;
 pub use draw::*;
 pub use ending::*;
 pub use flow::*;
+pub use intro::*;
+pub use lair::*;
 pub use opponent::*;
 pub use palette::*;
 pub use panel::*;
@@ -133,6 +137,18 @@ pub enum Actor {
     FlowWait(FlowWait),
     OpponentScreen(OpponentScreen),
     OpponentPortraits(OpponentPortraits),
+    IntroScript(IntroScript),
+    IntroBoxPart(IntroBoxPart),
+    OpponentIntro(OpponentIntro),
+    IntroExtra(IntroExtra),
+    IntroClouds(IntroClouds),
+    IntroShip(IntroShip),
+    Transition(Transition),
+    RobotnikIntro(RobotnikIntro),
+    LairSprite(LairSprite),
+    LairFlier(LairFlier),
+    LairLights(LairLights),
+    ThrownPiece(ThrownPiece),
 }
 
 impl Actor {
@@ -152,6 +168,9 @@ impl Actor {
                 | Actor::BouncingBean(_)
                 | Actor::BounceSparkle(_)
                 | Actor::RobotnikVoice(_)
+                | Actor::IntroBoxPart(_)
+                | Actor::LairLights(_)
+                | Actor::IntroExtra(IntroExtra::Sparks { .. })
                 | Actor::ShakeField(_)
         )
     }
@@ -186,6 +205,30 @@ impl Actor {
             Actor::FlowWait(w) => Some(w.code()),
             Actor::OpponentScreen(s) => Some(if s.started { OPPONENT_SCREEN_CODE } else { 0xD6A8 }),
             Actor::OpponentPortraits(p) => Some(p.code()),
+            Actor::IntroScript(s) => Some(s.state.code()),
+            Actor::IntroBoxPart(p) => Some(if p.tail { 0x113B8 } else { 0x113D8 }),
+            Actor::OpponentIntro(o) => Some(if o.leaving { 0xAAD6 } else { OPPONENT_INTRO_CODE }),
+            Actor::IntroExtra(e) => Some(match e {
+                IntroExtra::Flash { .. } => 0xA758,
+                IntroExtra::Sway { .. } => 0xA560,
+                IntroExtra::Cycle { .. } => 0xA7C4,
+                IntroExtra::Sparks { .. } => 0xA85C,
+                IntroExtra::Spark { .. } => 0xA8E2,
+                IntroExtra::Orbit { .. } => 0xA5F6,
+                IntroExtra::OrbitPiece { .. } => 0xA692,
+            }),
+            Actor::IntroClouds(_) => Some(INTRO_CLOUDS_CODE),
+            Actor::IntroShip(_) => Some(INTRO_SHIP_CODE),
+            Actor::Transition(t) => Some(t.code()),
+            Actor::RobotnikIntro(r) => Some(match (r.started, r.leaving) {
+                (false, _) => 0xAADA,
+                (true, false) => ROBOTNIK_INTRO_CODE,
+                (true, true) => 0xAAD6,
+            }),
+            Actor::LairSprite(s) => Some(s.kind.code()),
+            Actor::LairFlier(f) => Some(f.code()),
+            Actor::LairLights(_) => Some(LAIR_LIGHTS_CODE),
+            Actor::ThrownPiece(p) => Some(p.code()),
             Actor::FfuzzyPalette(p) => Some(if p.started { FFUZZY_PALETTE_CODE } else { 0x6E46 }),
             Actor::PaletteFade(_) => Some(PALETTE_FADE_CODE),
             Actor::Star(s) => Some(s.state.code()),
@@ -1007,7 +1050,7 @@ pub struct Engine {
     pub vdp_events: Vec<VdpEvent>,
     /// `vdp_reg_0`.. (the register mirror), `hscroll_buffer` (planes A and B).
     pub vdp_regs: [u8; 0x13],
-    pub hscroll: [u16; 2],
+    pub hscroll: [u16; 0x200],
     /// `pressed_time`/`unpressed_time`, `word_FF1122` (buttons ignored while set),
     /// `level_transition_flag`, `byte_FF0115` (the last match's winner),
     /// `opponents_defeated` (by opponent).
@@ -1016,6 +1059,19 @@ pub struct Engine {
     pub level_transition: u16,
     pub last_winner: u8,
     pub opponents_defeated: [u8; 18],
+    /// The intro: `use_lair_background`, `word_FF1990` (the script's cue to the
+    /// opponent), `word_FF198E`, `word_FF1994` (the opponent's x, for the box's tail),
+    /// `word_FF1126` (clouds paused), `byte_FF1128` (typing sound toggle), and an extra
+    /// cued that isn't ported.
+    pub use_lair: u8,
+    pub intro_cue: u16,
+    pub intro_198e: u16,
+    pub opponent_x: u16,
+    pub intro_pause: u8,
+    pub text_tick: u8,
+    pub unported_extra: Option<u8>,
+    /// `dma_queue`: transfers the next vertical blank makes (before its plane commands).
+    pub dma_queue: Vec<VdpOp>,
     /// `difficulty` (the option: 0-3) and `byte_FF0114` (stages the time bonus allows for).
     pub difficulty_option: u8,
     pub bonus_level: u8,
@@ -1087,12 +1143,20 @@ impl Engine {
             deferred_vblanks: 0,
             vdp_events: vec![],
             vdp_regs: [0; 0x13],
-            hscroll: [0; 2],
+            hscroll: [0; 0x200],
             repeat_times: (8, 2),
             input_lock: 0,
             level_transition: 0,
             last_winner: 0,
             opponents_defeated: [0; 18],
+            use_lair: 0,
+            intro_cue: 0,
+            intro_198e: 0,
+            opponent_x: 0,
+            intro_pause: 0,
+            text_tick: 0,
+            unported_extra: None,
+            dma_queue: vec![],
             difficulty_option: 0,
             bonus_level: 0,
             bytecode_flag: 0,
@@ -1196,7 +1260,11 @@ impl Engine {
     pub fn logic(&mut self, inputs: &Inputs) -> Result<(), Unported> {
         self.run_bytecode(inputs)?;
         self.long_step();
-        self.run_slots(0..SLOTS, inputs)
+        self.run_slots(0..SLOTS, inputs)?;
+        match self.unported_extra.take() {
+            Some(_) => Err(Unported("this opponent's intro extra (off_A15E)")),
+            None => Ok(()),
+        }
     }
 
     /// A long step of the logic (decompression): the vertical blanks it outlasts.
@@ -1215,6 +1283,10 @@ impl Engine {
         self.icons_drawn = [false; 2];
         self.rng_users.clear();
         self.current_slot = usize::MAX;
+        // TransferDMA (before the plane commands)
+        for what in std::mem::take(&mut self.dma_queue) {
+            self.vdp_events.push(VdpEvent { at: self.plane_writes.len(), what });
+        }
         for slot in std::mem::take(&mut self.fall_commands) {
             self.run_fall_command(slot);
         }
@@ -1276,6 +1348,21 @@ impl Engine {
                 Actor::FlowWait(w) => self.run_flow_wait(w).map(Actor::FlowWait),
                 Actor::OpponentScreen(s) => self.run_opponent_screen(s, inputs).map(Actor::OpponentScreen),
                 Actor::OpponentPortraits(p) => self.run_opponent_portraits(p).map(Actor::OpponentPortraits),
+                Actor::IntroScript(s) => self.run_intro_script(slot, s, inputs).map(Actor::IntroScript),
+                Actor::IntroBoxPart(p) => self.run_intro_box_part(p).map(Actor::IntroBoxPart),
+                Actor::OpponentIntro(o) => self.run_opponent_intro(slot, o).map(Actor::OpponentIntro),
+                Actor::IntroExtra(e) => self.run_intro_extra(e).map(Actor::IntroExtra),
+                Actor::IntroClouds(c) => self.run_intro_clouds(c).map(Actor::IntroClouds),
+                Actor::IntroShip(mut s) => {
+                    s.anim.step_with(&mut || self.random());
+                    Some(Actor::IntroShip(s))
+                }
+                Actor::Transition(t) => self.run_transition(t).map(Actor::Transition),
+                Actor::RobotnikIntro(r) => self.run_robotnik_intro(slot, r).map(Actor::RobotnikIntro),
+                Actor::LairSprite(s) => self.run_lair_sprite(s).map(Actor::LairSprite),
+                Actor::LairFlier(f) => self.run_lair_flier(f).map(Actor::LairFlier),
+                Actor::LairLights(l) => self.run_lair_lights(l).map(Actor::LairLights),
+                Actor::ThrownPiece(p) => self.run_thrown_piece(p).map(Actor::ThrownPiece),
                 Actor::FfuzzyPalette(p) => self.run_ffuzzy_palette(p).map(Actor::FfuzzyPalette),
                 Actor::PaletteFade(pf) => self.run_palette_fade(pf).map(Actor::PaletteFade),
                 Actor::Star(st) => self.run_star(st).map(Actor::Star),

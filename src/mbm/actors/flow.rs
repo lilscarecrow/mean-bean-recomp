@@ -25,6 +25,16 @@ pub enum VdpOp {
     Nemesis { vram: u16, art: u32 },
     /// A `PlaneCmdLists` entry, run by the vertical blank (`ProcPlaneCommands`).
     PlaneList { list: u16, row: u16 },
+    /// The intro's font (`NemDecRAM`, every long ORed with $11111111, DMAed to `vram`).
+    Font { vram: u16, art: u32 },
+    /// `SpecPlane8C`/`9F` save the plane words under the text box (`plane_a_buffer`),
+    /// `SpecPlane8D` puts them back: `cols` x `rows` from `at`, rows `row` bytes apart.
+    SaveBox { at: u16, cols: u16, rows: u16, row: u16 },
+    RestoreBox { at: u16, cols: u16, rows: u16, row: u16 },
+    /// A DMA of `len` bytes of ROM (uncompressed tiles) to `vram`.
+    RomCopy { vram: u16, from: u32, len: u16 },
+    /// Words written straight to VRAM (pattern pixels).
+    Words { at: u16, words: Vec<u16> },
 }
 
 /// Bytecode addresses (`Game_Bytecode`): the stage, the scenario's next opponent.
@@ -151,7 +161,13 @@ impl Engine {
                 // Sound: BSND / BSNDP / BSNDP2 (operand), BSFADE / BSSTOP (none).
                 0x0F | 0x10 | 0x13 => {}
                 0x11 | 0x12 => self.bytecode_pc -= 2,
-                _ => return Err(Unported("this bytecode op (BFADEI, the intro's fades)")),
+                // BFADEI
+                0x15 => {
+                    let (speed, lair) = (rom::byte(self.bytecode_pc), rom::byte(self.bytecode_pc + 1));
+                    self.bytecode_pc += 2;
+                    self.fade_intro(arg, speed, lair);
+                }
+                _ => return Err(Unported("this bytecode op")),
             }
         }
     }
@@ -190,6 +206,9 @@ impl Engine {
 
     /// The routines `BRUN` calls on the way between matches.
     fn run_routine(&mut self, at: u32, inputs: &Inputs) -> Result<(), Unported> {
+        if self.run_intro_routine(at)? {
+            return Ok(());
+        }
         match at {
             // InitPalette_Safe: the buffer cleared and every line marked for copying.
             0x116C => {
@@ -207,7 +226,7 @@ impl Engine {
             // ClearScroll
             0x0D58 => {
                 self.vscroll = [0; 40];
-                self.hscroll = [0; 2];
+                self.hscroll = [0; 0x200];
             }
             // LevelEnd
             0x3B62 => {
@@ -245,10 +264,7 @@ impl Engine {
             }
             0xD608 => self.draw_small_text(),
             // The opponent screen.
-            0xD620 => {
-                self.long_step(); // NemDec of the portraits
-                self.spawn_opponent_screen()
-            }
+            0xD620 => self.spawn_opponent_screen(),
             0xD4D2 => self.draw_opponent_boxes(),
             _ => return Err(Unported(Box::leak(format!("game flow routine ${at:06X}").into_boxed_str()))),
         }
