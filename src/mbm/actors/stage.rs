@@ -416,8 +416,10 @@ impl Engine {
 
     pub(super) fn run_danger(&mut self, mut d: Danger) -> Option<Danger> {
         if self.popping.iter().any(|&p| p) {
-            // The match is over: cancel fades of line 3, restore its colors (not ported).
+            // loc_1239C: the match is over: cancel fades of line 3, restore its colors.
             self.pal_fade_gen[3] = self.pal_fade_gen[3].wrapping_add(1);
+            let colors = self.opponent_palette();
+            self.load_palette(3, PaletteLoad::Colors(colors));
             return None;
         }
         d.spark_wait = d.spark_wait.wrapping_add(1) & 0x7FFF;
@@ -450,7 +452,8 @@ impl Engine {
         if d.flash != 0 {
             d.flash -= 1;
             if d.flash == 0 {
-                self.fade_palette(3, 0, 8); // back to the opponent's colors
+                let colors = self.opponent_palette();
+                self.fade_palette(3, 0, 8, &colors); // back to the opponent's colors
             }
             return Some(d);
         }
@@ -459,7 +462,7 @@ impl Engine {
             self.danger_flash = 0;
         } else if rate < d.flash_wait {
             d.flash_wait = 0;
-            self.fade_palette(3, 1, (3 & 7) + 1); // to white
+            self.fade_palette(3, 1, (3 & 7) + 1, &table_palette(PAL_WHITE)); // to white
             d.flash = 0x26;
             self.danger_flash = 0; // falls through into loc_12444
         }
@@ -526,11 +529,13 @@ impl Engine {
     }
 
     /// `FadeToPalette` (8 steps) / `FadeToPal_StepCount` (`steps & 7` + 1 steps).
-    fn fade_palette(&mut self, line: u16, speed: u8, steps: u16) {
+    fn fade_palette(&mut self, line: u16, speed: u8, steps: u16, target: &[u16; 16]) {
         let Some(slot) = self.find_actor_slot() else { return };
         let line = line & 3;
         let generation = &mut self.pal_fade_gen[usize::from(line)];
         *generation = generation.wrapping_add(1);
+        self.start_fade(usize::from(line), target);
+        let generation = &self.pal_fade_gen[usize::from(line)];
         let fade = PaletteFade { line, flag: *generation, timer: 0, speed: u16::from(speed), steps };
         self.slots[slot] = Some(Actor::PaletteFade(fade));
     }
@@ -545,6 +550,8 @@ impl Engine {
             return Some(p);
         }
         p.timer = 0;
+        self.fade_step(usize::from(p.line));
+        let generation = &mut self.pal_fade_gen[usize::from(p.line)];
         p.steps = p.steps.wrapping_sub(1);
         if p.steps == 0 {
             *generation = 0;
@@ -573,7 +580,9 @@ impl Engine {
             p.step = 0;
             p.level = level;
         }
+        let color_at;
         p.wait = if level == 3 {
+            color_at = ARMS_COLORS[2];
             0
         } else {
             let (steps, wait) = if level == 0 { (0x0E, 6) } else { (4, 4) };
@@ -582,9 +591,17 @@ impl Engine {
                 step = 0;
             }
             p.step = (p.step & 0xFF00) | u16::from(step);
+            color_at = ARMS_COLORS[usize::from(level != 0)] + u32::from(step) * 2;
             wait
         };
-        Some(p) // the palette color itself isn't ported
+        // loc_6FBA: the portrait's color 14 (line 2's while word_FF1124 is set).
+        let color = rom::word(color_at);
+        if self.portrait_lock != 0 {
+            self.set_palette_color(2, 14, color);
+        } else {
+            self.set_palette_color(3, 14, color);
+        }
+        Some(p)
     }
 }
 

@@ -41,15 +41,22 @@ pub fn match_vram(rom: &Rom, src: &dyn AssetSource, opponent: u8) -> Result<Vram
     Ok(vram)
 }
 
-/// The four palette lines of a match against `opponent` once the screen is set up (the
-/// portrait's palette actor then cycles line 3's color 14 on some stages).
-pub fn match_palettes(rom: &Rom, src: &dyn AssetSource, opponent: u8) -> [[u16; 16]; 4] {
+/// The four palette lines `BC_Level` loads (its `BPAL`s and `LoadLevelBGPal`), in the
+/// frame of `GenPuyoOrder`.
+pub fn level_palettes(rom: &Rom, src: &dyn AssetSource) -> [[u16; 16]; 4] {
     let mut lines = [[0u16; 16]; 4];
     for at in LEVEL_PALETTES {
         let v = rom.word(at);
         lines[usize::from(v & 3)] = src.palette(palette::PALETTE_TABLE + u32::from(v >> 3));
     }
     lines[2] = src.palette(palette::PALETTE_TABLE + rom.long(LEVEL_BG_PALETTE));
+    lines
+}
+
+/// The four palette lines of a match against `opponent` once the screen is set up
+/// (`loc_6070` puts the portrait's on line 3).
+pub fn match_palettes(rom: &Rom, src: &dyn AssetSource, opponent: u8) -> [[u16; 16]; 4] {
+    let mut lines = level_palettes(rom, src);
     let index = rom.byte(OPPONENT_PALETTES + u32::from(opponent));
     lines[3] = src.palette(palette::PALETTE_TABLE + u32::from(index) * 32);
     lines

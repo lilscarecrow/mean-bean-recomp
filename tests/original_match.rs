@@ -47,6 +47,32 @@ fn engine_from(ram: &Ram) -> Result<Engine, String> {
 
 /// Everything but the actors: what the game flow leaves for a match (settings, the
 /// score so far, tables kept between matches, the random seed, the clocks).
+/// `palette_buffer`, `palette_pointers` (flag word + pointer per line: into the buffer
+/// itself, or to colors in ROM or RAM) and `pal_fade_data` as the engine keeps them.
+fn palette_state(ram: &Ram) -> ([[u16; 16]; 4], [Option<PaletteLoad>; 4], [FadeData; 4]) {
+    const BUFFER: u32 = 0xFF_0A56;
+    let colors = |at: u32| -> [u16; 16] {
+        std::array::from_fn(|c| {
+            let a = at + c as u32 * 2;
+            if a >= 0xFF_0000 { ram.u16(a) } else { bean_machine::mbm::rom::word(a) }
+        })
+    };
+    let palettes = std::array::from_fn(|l| colors(BUFFER + l as u32 * 0x20));
+    let loads = std::array::from_fn(|l| {
+        let at = 0xFF_0A3E + l as u32 * 6;
+        if ram.u16(at) == 0 {
+            return None;
+        }
+        let ptr = ram.u32(at + 2) & 0xFF_FFFF;
+        Some(if (BUFFER..BUFFER + 0x80).contains(&ptr) { PaletteLoad::Buffer } else { PaletteLoad::Colors(colors(ptr)) })
+    });
+    let fades = std::array::from_fn(|l| {
+        let at = PAL_FADE + l as u32 * 0x82;
+        FadeData { current: ram.bytes(at + 2, 48).try_into().unwrap(), step: ram.bytes(at + 0x32, 48).try_into().unwrap() }
+    });
+    (palettes, loads, fades)
+}
+
 /// `vscroll_buffer`.
 const VSCROLL: u32 = 0xFF_05D2;
 
@@ -79,6 +105,7 @@ fn globals_from(ram: &Ram) -> Engine {
     e.danger_flash = ram.u8(0xFF_1121);
     e.portrait_lock = ram.u16(0xFF_1124);
     e.pal_fade_gen = [0, 1, 2, 3].map(|i| ram.u16(PAL_FADE + i * 0x82));
+    (e.palettes, e.palette_loads, e.pal_fades) = palette_state(ram);
     e.difficulty_option = ram.u8(0xFF_1120);
     e.bonus_level = ram.u8(0xFF_0114);
     e.bytecode_flag = ram.u8(0xFF_0A3A);
@@ -182,6 +209,25 @@ fn mismatch_except(e: &Engine, ram: &Ram, skip: Option<usize>) -> Option<String>
     let gens = [0, 1, 2, 3].map(|i| ram.u16(PAL_FADE + i * 0x82));
     if gens != e.pal_fade_gen {
         return Some(format!("palette fade generations: ROM {gens:?} ours {:?}", e.pal_fade_gen));
+    }
+    let (palettes, loads, fades) = palette_state(ram);
+    if palettes != e.palettes {
+        return Some(format!("palette_buffer
+  ROM {palettes:04X?}
+  our {:04X?}", e.palettes));
+    }
+    if loads != e.palette_loads {
+        return Some(format!("palette loads
+  ROM {loads:04X?}
+  our {:04X?}", e.palette_loads));
+    }
+    for line in 0..4 {
+        // (only lines that have faded: the rest is whatever an earlier screen left)
+        if e.pal_fades[line] != FadeData::default() && fades[line] != e.pal_fades[line] {
+            return Some(format!("line {line} fade data
+  ROM {:02X?}
+  our {:02X?}", fades[line], e.pal_fades[line]));
+        }
     }
     if ram.u8(0xFF_1121) != e.danger_flash {
         return Some(format!("danger flash: ROM {} ours {}", ram.u8(0xFF_1121), e.danger_flash));
@@ -392,6 +438,13 @@ fn match_setups(all: &[Ram]) -> Vec<usize> {
     (1..all.len()).filter(|&f| p1_at(&all[f], 0x3D80) && !any_p1(&all[f - 1])).collect()
 }
 
+/// `BC_Level`'s palettes from the ROM.
+fn level_palettes() -> [[u16; 16]; 4] {
+    use bean_machine::mbm::assets::{screen, Rom, RomAssets};
+    let rom = Rom(bean_machine::mbm::rom::get().unwrap());
+    screen::level_palettes(&rom, &RomAssets::new().unwrap())
+}
+
 enum Start {
     /// Not a clean start (a scenario poked RAM, or actors left over).
     Skipped,
@@ -418,6 +471,7 @@ fn start_from_settings(all: &[Ram], s: usize, poked: &std::collections::HashSet<
     let fail = |f: usize, what: &str, m: String| -> String { format!("frame {f} ({what}): {m}") };
     // GenPuyoOrder, then the frames up to the setup.
     e.vblank();
+    e.load_palettes(&level_palettes());
     e.deal_bean_orders();
     if let Some(m) = mismatch(&e, &all[g]) {
         return Err(fail(g, "bean orders", m));

@@ -34,6 +34,7 @@ pub struct Game {
     pub level: u8,
     rom: Rom<'static>,
     vram: Vram,
+    /// `BC_Level`'s palette lines.
     palettes: [[u16; 16]; 4],
     pads: [Pad; 2],
     /// `draw_order`: DrawActors walks the slots forwards and backwards on alternate frames.
@@ -60,7 +61,8 @@ impl Game {
         e.rng = Rng::new(seed);
         let mut vram = screen::match_vram(&rom, &src, opponent)?;
         planes::match_planes(&rom, &mut vram)?;
-        let palettes = screen::match_palettes(&rom, &src, opponent);
+        // BC_Level's palettes, loaded in GenPuyoOrder's frame (the screen before is black).
+        let palettes = screen::level_palettes(&rom, &src);
         Ok(Game {
             engine: e,
             status: Status::Starting(0),
@@ -87,6 +89,7 @@ impl Game {
                 e.vblank();
                 let r = match step {
                     0 => {
+                        e.load_palettes(&self.palettes);
                         e.deal_bean_orders();
                         Ok(())
                     }
@@ -158,7 +161,7 @@ impl Game {
 
     /// The picture as RGBA (320 x 224).
     pub fn picture(&self) -> Vec<u8> {
-        let cram: [u16; 64] = std::array::from_fn(|i| self.palettes[i / 16][i % 16]);
+        let cram: [u16; 64] = std::array::from_fn(|i| self.engine.palettes[i / 16][i % 16]);
         let pixels = render::render(&Layout::match_screen(), &self.vram.0, &cram, &self.engine.vscroll);
         let mut out = Vec::with_capacity(pixels.len() * 4);
         for p in pixels {

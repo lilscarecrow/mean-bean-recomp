@@ -189,6 +189,9 @@ impl Engine {
         self.queue_panel(PanelCommand::Names);
         self.portrait_lock = 0;
         self.danger_flash = 0;
+        // sub_61E0: the portrait's palette on line 3.
+        let colors = self.opponent_palette();
+        self.load_palette(3, PaletteLoad::Colors(colors));
         self.crowding = 0;
         let Some(portrait) = self.find_actor_slot() else { return Ok(()) };
         let p = Portrait { started: false, level: 0, base: 0, wait: 0, shown: 0, next: 0, map: 0 };

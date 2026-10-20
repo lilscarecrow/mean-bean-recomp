@@ -22,12 +22,14 @@ use super::rng::Rng;
 
 mod draw;
 mod ending;
+mod palette;
 mod panel;
 mod setup;
 mod sprite;
 mod stage;
 pub use draw::*;
 pub use ending::*;
+pub use palette::*;
 pub use panel::*;
 pub use sprite::*;
 pub use stage::*;
@@ -923,6 +925,11 @@ pub struct Engine {
     pub portrait_lock: u16,
     /// The generation word of each palette line's fade (`pal_fade_data`, $82 apart).
     pub pal_fade_gen: [u16; 4],
+    /// `palette_buffer` (4 lines), the lines `LoadPalette` marked for the next vertical
+    /// blank (`palette_pointers`), and each line's fade (`pal_fade_data`).
+    pub palettes: [[u16; 16]; 4],
+    pub palette_loads: [Option<PaletteLoad>; 4],
+    pub pal_fades: [FadeData; 4],
     /// The fields' cell bytes as the drawing sees them, and the plane A tile writes
     /// (VRAM address, pattern word) made since the caller last took them.
     pub field_bytes: [FieldBytes; 2],
@@ -990,6 +997,9 @@ impl Engine {
             danger_flash: 0,
             portrait_lock: 0,
             pal_fade_gen: [0; 4],
+            palettes: [[0; 16]; 4],
+            palette_loads: [None; 4],
+            pal_fades: [FadeData::default(); 4],
             field_bytes: [FieldBytes::default(), FieldBytes::default()],
             plane_writes: vec![],
             panel_commands: vec![],
@@ -1114,6 +1124,7 @@ impl Engine {
             self.run_password_command();
         }
         self.run_panel_commands();
+        self.copy_palettes();
         self.random();
         // HandleTime
         if (self.player_flags[0] | self.player_flags[1]) & 0x80 == 0 {
