@@ -1,6 +1,7 @@
 //! Runs a stage without a window and writes frames as PPM images (for checking the
 //! picture). Usage: cargo run --release --example headless -- <rom> <frames> <every> <outdir> [level] [a_from]
 //! (`a_from`: from that frame on, tap A instead: name entry letters, the game over countdown).
+//! `MBM_START_PC=1FC4` starts the game flow at that bytecode address instead (the ending).
 use bean_machine::mbm::{game::Game, rom};
 
 fn main() {
@@ -12,6 +13,9 @@ fn main() {
     let level = args.get(5).and_then(|l| l.parse().ok()).unwrap_or(3);
     let a_from: u32 = args.get(6).and_then(|l| l.parse().ok()).unwrap_or(u32::MAX);
     let mut game = Game::new(level, 2, 0, 0x1234_5678).expect("game");
+    if let Some(pc) = std::env::var("MBM_START_PC").ok().and_then(|v| u32::from_str_radix(&v, 16).ok()) {
+        game.engine.bytecode_pc = pc;
+    }
     for f in 0..frames {
         // Hold nothing; tap down now and then so pairs come down.
         let p1 = if f >= a_from {

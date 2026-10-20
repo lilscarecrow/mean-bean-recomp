@@ -60,7 +60,12 @@ pub fn frame(rom: &Rom, mappings: u8, frame: u8) -> Vec<Piece> {
 
 /// `DrawActorSprite`: the sprites of an actor at (x, y) showing `frame` of `mappings`.
 pub fn place(rom: &Rom, mappings: u8, frame_index: u8, x: u16, y: u16, vscroll: u16) -> Vec<Sprite> {
-    frame(rom, mappings, frame_index)
+    place_pieces(frame(rom, mappings, frame_index), x, y, vscroll)
+}
+
+/// As `place`, for a frame given as pieces (mapping list 7's frames are built in RAM).
+pub fn place_pieces(pieces: Vec<Piece>, x: u16, y: u16, vscroll: u16) -> Vec<Sprite> {
+    pieces
         .into_iter()
         .map(|p| {
             let sx = p.x.wrapping_add(x);

@@ -112,6 +112,7 @@ impl Game {
         e.control_player_1 = 0xFF;
         e.result_score = score;
         e.rng = Rng::new(seed);
+        e.load_default_high_scores();
         // The screen as the level transition leaves it (board art and maps); the flow
         // from BC_Level loads the rest.
         let mut vram = screen::match_vram(&rom, &src, opponent)?;
@@ -191,10 +192,17 @@ impl Game {
     fn build_sprite_table(&mut self) {
         let mut list: Vec<sprites::Sprite> = vec![];
         let order: Vec<usize> = if self.backwards { (0..SLOTS).rev().collect() } else { (0..SLOTS).collect() };
+        // (sprites move with plane A's vertical scroll)
+        let vscroll = self.engine.vscroll[0];
         self.backwards = !self.backwards;
         'slots: for slot in order {
             let Some(d) = self.engine.draw_of(slot).filter(|d| d.shown()) else { continue };
-            for s in sprites::place(&self.rom, d.mappings, d.frame, d.x, d.y, 0) {
+            // (mapping list 7's frames are the epilogue's lines, built in RAM)
+            let placed = match self.engine.line_maps.get(usize::from(d.frame)).filter(|_| d.mappings == 7) {
+                Some(pieces) => sprites::place_pieces(pieces.clone(), d.x, d.y, vscroll),
+                None => sprites::place(&self.rom, d.mappings, d.frame, d.x, d.y, vscroll),
+            };
+            for s in placed {
                 if list.len() + 1 >= sprites::MAX_SPRITES {
                     break 'slots;
                 }

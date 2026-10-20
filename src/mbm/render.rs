@@ -127,7 +127,8 @@ pub fn render(layout: &Layout, vram: &[u8], cram: &[u16; 64], vsram: &[u16]) -> 
     let mut link = 0usize;
     for _ in 0..80 {
         let at = usize::from(layout.sprites) + link * 8;
-        let y = usize::from(word(vram, at) & 0x3FF);
+        // (9 bits outside interlace mode: the ending's lines rely on it wrapping)
+        let y = usize::from(word(vram, at) & 0x1FF);
         let size = vram[(at + 2) & 0xFFFF];
         let next = usize::from(vram[(at + 3) & 0xFFFF] & 0x7F);
         let attr = word(vram, at + 4);

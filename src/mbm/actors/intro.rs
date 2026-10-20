@@ -107,10 +107,14 @@ pub struct IntroClouds {
 
 pub const INTRO_CLOUDS_CODE: u32 = 0xB1AC;
 
-/// `loc_F942`: Robotnik's ship on the mountain (mappings $40).
+/// `loc_F942`: Robotnik's ship on the mountain (mappings $40); the ending's ships
+/// (`loc_F994`, `loc_F9E0`) are the same at other places.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct IntroShip {
+    pub code: u32,
     pub anim: Anim,
+    pub x: u16,
+    pub y: u16,
 }
 
 pub const INTRO_SHIP_CODE: u32 = 0xF942;
@@ -235,15 +239,7 @@ impl Engine {
                 self.use_lair = lair;
                 self.bytecode_flag = lair >> 1;
                 self.queue_panel(PanelCommand::List(0));
-                // loc_B152: the clouds (not in the lair).
-                if lair == 0 {
-                    self.intro_pause = 0;
-                    self.vdp_regs[0x0B] |= 3;
-                    if let Some(slot) = self.find_actor_slot() {
-                        let c = IntroClouds { pos: [0; 4], speed: [0xFFFF_0000, 0xFFFF_4000, 0xFFFF_8000, 0xFFFF_C000] };
-                        self.slots[slot] = Some(Actor::IntroClouds(c));
-                    }
-                }
+                self.spawn_clouds();
             }
             // PlayLevelIntroMusic
             0x2692 => {}
@@ -260,8 +256,7 @@ impl Engine {
                     _ => 3,
                 };
                 let (map, base, w, h, to) = BACKDROP_MAPS[i];
-                self.long_step();
-                self.eni_dec(map, base, w, h, to);
+                self.eni_dec_safe(map, base, w, h, to);
             }
             // loc_B0D6: the sky's and the opponent's palettes fade in
             0xB0D6 => {
@@ -276,7 +271,7 @@ impl Engine {
                     let mut anim = Anim::new(0xF94A);
                     anim.time = 0x20;
                     anim.frame = 0x39;
-                    self.slots[slot] = Some(Actor::IntroShip(IntroShip { anim }));
+                    self.slots[slot] = Some(Actor::IntroShip(IntroShip { code: INTRO_SHIP_CODE, anim, x: 0xF1, y: 0xFFE0 }));
                 }
             }
             _ => return Ok(false),
@@ -307,14 +302,7 @@ impl Engine {
     pub(super) fn run_intro_script(&mut self, slot: usize, mut s: IntroScript, inputs: &Inputs) -> Option<IntroScript> {
         match s.state {
             IntroScriptState::Start => {
-                // The font, decompressed to RAM with every pixel's bit 0 set, DMAed to $0000.
-                self.long_step();
-                self.dma_queue.push(VdpOp::Font { vram: 0, art: FONT_ART });
-                // It's decompressed into hblank_buffer_1, whose first word the game over
-                // wave later counts on from.
-                if let Some(Ok((font, _))) = rom::get().map(|r| nemesis::decompress(&r[FONT_ART as usize..])) {
-                    self.hblank_count = u16::from_be_bytes([font[0], font[1]]) | 0x1111;
-                }
+                self.load_intro_font();
                 s.ptr = rom::long(SCRIPTS + u32::from(self.opponent) * 4);
                 s.state = IntroScriptState::Run;
                 return Some(s);
@@ -640,6 +628,32 @@ impl Engine {
                 }
                 Some(IntroExtra::Spark { draw, motion, anim, life })
             }
+        }
+    }
+
+    /// `sub_10E5C`: the font, decompressed to RAM with every pixel's bit 0 set, DMAed
+    /// to $0000.
+    pub(super) fn load_intro_font(&mut self) {
+        self.long_step();
+        self.dma_queue.push(VdpOp::Font { vram: 0, art: FONT_ART });
+        // It's decompressed into hblank_buffer_1, whose first word the game over wave
+        // later counts on from.
+        if let Some(Ok((font, _))) = rom::get().map(|r| nemesis::decompress(&r[FONT_ART as usize..])) {
+            self.hblank_count = u16::from_be_bytes([font[0], font[1]]) | 0x1111;
+        }
+    }
+
+    /// `loc_B152`: the clouds (not in the lair); `dword_FF112C` keeps their slot.
+    pub(super) fn spawn_clouds(&mut self) {
+        if self.use_lair != 0 {
+            return;
+        }
+        self.intro_pause = 0;
+        self.vdp_regs[0x0B] |= 3;
+        if let Some(slot) = self.find_actor_slot() {
+            let c = IntroClouds { pos: [0; 4], speed: [0xFFFF_0000, 0xFFFF_4000, 0xFFFF_8000, 0xFFFF_C000] };
+            self.slots[slot] = Some(Actor::IntroClouds(c));
+            self.clouds_slot = slot;
         }
     }
 

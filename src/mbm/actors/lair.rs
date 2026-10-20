@@ -195,21 +195,14 @@ impl Engine {
                 }
             }
             0xF5F6 => {
-                self.long_step();
                 let (map, base, prio) = LAIR_MACHINE;
-                self.eni_dec(map, base, 0x27, 0x12, 0xD200);
-                for i in 0..0x28 * 0x13 {
-                    let bit = u16::from(rom::byte(prio + i as u32) & 1) << 15;
-                    self.eni_buffer[i] |= bit;
-                }
+                self.eni_dec_prio_safe(map, base, 0x27, 0x12, 0xD200, prio);
             }
             0xF640 => {
-                self.long_step();
-                self.eni_dec(LAIR_WALL.0, LAIR_WALL.1, 0x27, 0x12, 0xF600);
+                self.eni_dec_safe(LAIR_WALL.0, LAIR_WALL.1, 0x27, 0x12, 0xF600);
             }
             0xF680 => {
-                self.long_step();
-                self.eni_dec(LAIR_FLOOR.0, LAIR_FLOOR.1, 0x27, 8, 0xDB80);
+                self.eni_dec_safe(LAIR_FLOOR.0, LAIR_FLOOR.1, 0x27, 8, 0xDB80);
             }
             0xF6C0 => {}
             0xF8FC => self.spawn_lair_parts(),

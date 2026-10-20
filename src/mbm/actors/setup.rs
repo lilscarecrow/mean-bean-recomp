@@ -198,24 +198,33 @@ impl Engine {
     /// bytecode runs it, then `RunActors`).
     pub fn start_stage(&mut self) -> Result<(), Unported> {
         self.portrait_lock = 0;
+        self.start_portrait(0x8000, 0xE000, 0xC61E);
+        Ok(())
+    }
+
+    /// `loc_6084` on: the portrait (art at `art_at`, drawn on the plane at `plane` + `at`)
+    /// and the stage's actors. The credits (`sub_604E`, `word_FF1124` set) put them
+    /// elsewhere.
+    pub(super) fn start_portrait(&mut self, art_at: u16, plane: u16, at: u16) {
         self.danger_flash = 0;
         // The portrait's art (NemDec, interrupts off), and on Frankly's stage his lightning.
         let art = rom::long(OPPONENT_ART + u32::from(self.opponent) * 4);
-        self.vdp_events.push(VdpEvent { at: self.plane_writes.len(), what: VdpOp::Nemesis { vram: 0x8000, art } });
+        self.vdp_events.push(VdpEvent { at: self.plane_writes.len(), what: VdpOp::Nemesis { vram: art_at, art } });
         if self.level_mode & 3 == 0 && self.opponent == OPP_FRANKLY {
             let art = rom::long(FRANKLY_LIGHTNING);
             self.vdp_events.push(VdpEvent { at: self.plane_writes.len(), what: VdpOp::Nemesis { vram: 0x1E00, art } });
         }
-        // sub_61E0: the portrait's palette on line 3.
+        // sub_61E0: the portrait's palette on the line its plane address picks.
         let colors = self.opponent_palette();
-        self.load_palette(3, PaletteLoad::Colors(colors));
+        self.load_palette(usize::from(plane.rotate_left(3) as u8 & 0x0B), PaletteLoad::Colors(colors));
         self.crowding = 0;
-        let Some(portrait) = self.find_actor_slot() else { return Ok(()) };
-        let p = Portrait { started: false, level: 0, base: 0, wait: 0, shown: 0, next: 0, map: 0 };
+        let Some(portrait) = self.find_actor_slot() else { return };
+        let p = Portrait { started: false, level: 0, base: 0, wait: 0, shown: 0, next: 0, map: 0, tile: (art_at >> 5) | plane, at };
         self.slots[portrait] = Some(Actor::Portrait(p));
         if self.level_mode & 3 != 0 {
-            return Ok(());
+            return;
         }
+        let credits = self.portrait_lock != 0;
         match self.opponent {
             OPP_ARMS => {
                 if let Some(slot) = self.find_actor_slot() {
@@ -227,7 +236,7 @@ impl Engine {
                 for i in 0..6u32 {
                     let Some(slot) = self.find_actor_slot() else { continue };
                     let at = FRANKLY_HOPPERS + i * 10;
-                    let hopper = BgSlide {
+                    let mut hopper = BgSlide {
                         draw: 0,
                         frame: rom::byte(at + 8),
                         steps: 0,
@@ -239,12 +248,17 @@ impl Engine {
                         x: rom::word(at),
                         y: rom::word(at + 2),
                     };
+                    if credits {
+                        hopper.x = hopper.x.wrapping_sub(0x58);
+                        hopper.y = hopper.y.wrapping_sub(0xF8);
+                        hopper.frame = hopper.frame.wrapping_add(4);
+                    }
                     self.slots[slot] = Some(Actor::BgSlide(hopper));
                 }
             }
             OPP_HUMPTY => {
                 if let Some(slot) = self.find_actor_slot() {
-                    let runner = BgRunner {
+                    let mut runner = BgRunner {
                         portrait,
                         draw: 0,
                         latch: 0,
@@ -255,6 +269,12 @@ impl Engine {
                         y: 0xE6,
                         anim: Anim { ptr: 0, time: 0, frame: 0 },
                     };
+                    if credits {
+                        runner.x -= 0x58;
+                        runner.y = runner.y.wrapping_sub(0xF8);
+                        runner.anim.frame = 8;
+                        runner.pause = 4;
+                    }
                     self.slots[slot] = Some(Actor::BgRunner(runner));
                 }
             }
@@ -273,6 +293,5 @@ impl Engine {
             }
             _ => {}
         }
-        Ok(())
     }
 }

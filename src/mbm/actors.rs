@@ -21,9 +21,13 @@ use super::assets::planes::FIELD_ORIGIN;
 use super::rng::Rng;
 
 mod draw;
+mod credits;
 mod ending;
+mod epilogue;
+mod finale;
 mod flow;
 mod game_over;
+mod high_scores;
 mod intro;
 mod lair;
 mod opponent;
@@ -33,9 +37,13 @@ mod setup;
 mod sprite;
 mod stage;
 pub use draw::*;
+pub use credits::*;
 pub use ending::*;
+pub use epilogue::*;
+pub use finale::*;
 pub use flow::*;
 pub use game_over::*;
+pub use high_scores::*;
 pub use intro::*;
 pub use lair::*;
 pub use opponent::*;
@@ -153,7 +161,32 @@ pub enum Actor {
     ThrownPiece(ThrownPiece),
     GameOverTimer(GameOverTimer),
     GameOverLetter(GameOverLetter),
-    GameOverRobotnik(GameOverRobotnik),
+    CutsceneRobotnik(CutsceneRobotnik),
+    HighScoreTable(HighScoreTable),
+    DefeatSounds(DefeatSounds),
+    DefeatShip(DefeatShip),
+    DefeatPiece(DefeatPiece),
+    DefeatPart(DefeatPart),
+    /// `loc_10486`: a button skips the ending's current part.
+    Skip,
+    SparkleSpawner(SparkleSpawner),
+    ShipSparkle(ShipSparkle),
+    RoleCall(RoleCall),
+    Walker(Walker),
+    /// `sub_104E2`.
+    BackdropProp,
+    Typist(Typist),
+    LairReveal(LairReveal),
+    HasBean(HasBean),
+    HasBeanShadow(HasBeanShadow),
+    FireworkColors(FireworkColors),
+    FireworkSpawner(FireworkSpawner),
+    FireworkSpark(FireworkSpark),
+    Dawn(Dawn),
+    Epilogue(Epilogue),
+    CreditLine(CreditLine),
+    TableNameEntry(TableNameEntry),
+    TableCursor(TableCursor),
 }
 
 impl Actor {
@@ -178,6 +211,13 @@ impl Actor {
                 | Actor::IntroExtra(IntroExtra::Sparks { .. })
                 | Actor::ShakeField(_)
                 | Actor::GameOverLetter(_)
+                | Actor::SparkleSpawner(_)
+                | Actor::Walker(_)
+                | Actor::BackdropProp
+                | Actor::Typist(_)
+                | Actor::HasBean(_)
+                | Actor::FireworkColors(_)
+                | Actor::FireworkSpawner(_)
         )
     }
 
@@ -224,7 +264,7 @@ impl Actor {
                 IntroExtra::OrbitPiece { .. } => 0xA692,
             }),
             Actor::IntroClouds(_) => Some(INTRO_CLOUDS_CODE),
-            Actor::IntroShip(_) => Some(INTRO_SHIP_CODE),
+            Actor::IntroShip(s) => Some(s.code),
             Actor::Transition(t) => Some(t.code()),
             Actor::RobotnikIntro(r) => Some(match (r.started, r.leaving) {
                 (false, _) => 0xAADA,
@@ -237,7 +277,30 @@ impl Actor {
             Actor::ThrownPiece(p) => Some(p.code()),
             Actor::GameOverTimer(t) => Some(if t.done { 0xDB64 } else { GAME_OVER_TIMER_CODE }),
             Actor::GameOverLetter(l) => Some(l.phase.code()),
-            Actor::GameOverRobotnik(r) => Some(if r.started { GAME_OVER_ROBOTNIK_CODE } else { 0xEE10 }),
+            Actor::CutsceneRobotnik(r) => Some(if r.started { CUTSCENE_ROBOTNIK_CODE } else { 0xEE10 }),
+            Actor::HighScoreTable(t) => Some(t.phase.code()),
+            Actor::DefeatSounds(s) => Some([0xCB52, 0xCB68, 0xCB86, 0xCBA4][usize::from(s.stage.min(3))]),
+            Actor::DefeatShip(s) => Some(if s.flying { 0xCB1C } else { 0xCAFC }),
+            Actor::DefeatPiece(p) => Some(p.phase.code()),
+            Actor::DefeatPart(p) => Some(p.code()),
+            Actor::Skip => Some(SKIP_CODE),
+            Actor::SparkleSpawner(_) => Some(SPARKLE_SPAWNER_CODE),
+            Actor::ShipSparkle(_) => Some(SHIP_SPARKLE_CODE),
+            Actor::RoleCall(r) => Some(r.code()),
+            Actor::Walker(w) => Some(w.code()),
+            Actor::BackdropProp => Some(BACKDROP_PROP_CODE),
+            Actor::Typist(_) => Some(TYPIST_CODE),
+            Actor::LairReveal(l) => Some(l.code()),
+            Actor::HasBean(b) => Some(b.code()),
+            Actor::HasBeanShadow(s) => Some(s.code()),
+            Actor::FireworkColors(c) => Some([0xFAE6, 0xFAF6, 0xFAFC][usize::from(c.phase.min(2))]),
+            Actor::FireworkSpawner(s) => Some([0xFBA0, 0xFBAE, 0xFBD8][usize::from(s.phase.min(2))]),
+            Actor::FireworkSpark(_) => Some(FIREWORK_SPARK_CODE),
+            Actor::Dawn(d) => Some(d.code()),
+            Actor::Epilogue(e) => Some(e.code()),
+            Actor::CreditLine(l) => Some(if l.stopped { 0xB646 } else { 0xB60E }),
+            Actor::TableNameEntry(n) => Some(n.phase.code()),
+            Actor::TableCursor(_) => Some(TABLE_CURSOR_CODE),
             Actor::FfuzzyPalette(p) => Some(if p.started { FFUZZY_PALETTE_CODE } else { 0x6E46 }),
             Actor::PaletteFade(_) => Some(PALETTE_FADE_CODE),
             Actor::Star(s) => Some(s.state.code()),
@@ -1081,6 +1144,8 @@ pub struct Engine {
     pub unported_extra: Option<u8>,
     /// `hblank_buffer_1`'s first word: the game over wave's phase.
     pub hblank_count: u16,
+    /// Something reached that isn't ported (checked after the frame's actors).
+    pub unported_note: Option<&'static str>,
     /// `dma_queue`: transfers the next vertical blank makes (before its plane commands).
     pub dma_queue: Vec<VdpOp>,
     /// `difficulty` (the option: 0-3) and `byte_FF0114` (stages the time bonus allows for).
@@ -1099,6 +1164,23 @@ pub struct Engine {
     /// `high_scores` (a table of 5 x 16 bytes per mode) and `high_score_table_id`.
     pub high_scores: Vec<u8>,
     pub high_score_table: u8,
+    /// `byte_FF1973`: show the next mode's table too.
+    pub high_score_both: bool,
+    /// `sound_test_enabled` ($FFFC02): set by beating the game.
+    pub sound_test: u16,
+    /// `dword_FF112C`: the clouds' slot.
+    pub clouds_slot: usize,
+    /// The slot of the actor that took a long step (decompression) this frame, for
+    /// the tests: the original may show it halfway through.
+    pub long_actor: Option<usize>,
+    /// The epilogue: `word_FF1134` (stops the fireworks), `dword_FF1130` (the bursts'
+    /// wait mask, their color), `byte_FF143E` (line slots in use) and the lines' sprite
+    /// mappings (`byte_FF1446`, mapping list 7's frames).
+    pub fireworks_stop: u16,
+    pub fireworks_mask: u16,
+    pub fireworks_color: u16,
+    pub line_slots: [u8; 8],
+    pub line_maps: Vec<Vec<super::assets::sprites::Piece>>,
 }
 
 impl Engine {
@@ -1167,6 +1249,16 @@ impl Engine {
             intro_pause: 0,
             text_tick: 0,
             hblank_count: 0,
+            unported_note: None,
+            high_score_both: false,
+            sound_test: 0,
+            clouds_slot: 0,
+            long_actor: None,
+            fireworks_stop: 0,
+            fireworks_mask: 0,
+            fireworks_color: 0,
+            line_slots: [0; 8],
+            line_maps: vec![vec![]; 8],
             unported_extra: None,
             dma_queue: vec![],
             difficulty_option: 0,
@@ -1272,7 +1364,11 @@ impl Engine {
     pub fn logic(&mut self, inputs: &Inputs) -> Result<(), Unported> {
         self.run_bytecode(inputs)?;
         self.long_step();
+        self.long_actor = None;
         self.run_slots(0..SLOTS, inputs)?;
+        if let Some(what) = self.unported_note.take() {
+            return Err(Unported(what));
+        }
         match self.unported_extra.take() {
             Some(_) => Err(Unported("this opponent's intro extra (off_A15E)")),
             None => Ok(()),
@@ -1281,6 +1377,9 @@ impl Engine {
 
     /// A long step of the logic (decompression): the vertical blanks it outlasts.
     pub fn long_step(&mut self) {
+        if self.current_slot != usize::MAX && self.long_actor.is_none() {
+            self.long_actor = Some(self.current_slot);
+        }
         for _ in 0..std::mem::take(&mut self.deferred_vblanks) {
             self.vblank();
         }
@@ -1377,7 +1476,30 @@ impl Engine {
                 Actor::ThrownPiece(p) => self.run_thrown_piece(p).map(Actor::ThrownPiece),
                 Actor::GameOverTimer(t) => self.run_game_over_timer(t, inputs).map(Actor::GameOverTimer),
                 Actor::GameOverLetter(l) => self.run_game_over_letter(l).map(Actor::GameOverLetter),
-                Actor::GameOverRobotnik(r) => self.run_game_over_robotnik(r).map(Actor::GameOverRobotnik),
+                Actor::CutsceneRobotnik(r) => self.run_cutscene_robotnik(r).map(Actor::CutsceneRobotnik),
+                Actor::HighScoreTable(t) => self.run_high_score_table(slot, t, inputs).map(Actor::HighScoreTable),
+                Actor::TableNameEntry(n) => self.run_table_name_entry(slot, n, inputs).map(Actor::TableNameEntry),
+                Actor::TableCursor(c) => self.run_table_cursor(c).map(Actor::TableCursor),
+                Actor::DefeatSounds(s) => self.run_defeat_sounds(s).map(Actor::DefeatSounds),
+                Actor::DefeatShip(s) => self.run_defeat_ship(s).map(Actor::DefeatShip),
+                Actor::DefeatPiece(p) => self.run_defeat_piece(p).map(Actor::DefeatPiece),
+                Actor::DefeatPart(p) => self.run_defeat_part(p).map(Actor::DefeatPart),
+                Actor::Skip => self.run_skip(inputs).then_some(Actor::Skip),
+                Actor::SparkleSpawner(s) => self.run_sparkle_spawner(s).map(Actor::SparkleSpawner),
+                Actor::ShipSparkle(s) => self.run_ship_sparkle(s).map(Actor::ShipSparkle),
+                Actor::RoleCall(r) => self.run_role_call(slot, r).map(Actor::RoleCall),
+                Actor::Walker(w) => self.run_walker(w).map(Actor::Walker),
+                Actor::BackdropProp => self.run_backdrop_prop().then_some(Actor::BackdropProp),
+                Actor::Typist(t) => self.run_typist(t).map(Actor::Typist),
+                Actor::LairReveal(l) => self.run_lair_reveal(l).map(Actor::LairReveal),
+                Actor::HasBean(b) => self.run_has_bean(b).map(Actor::HasBean),
+                Actor::HasBeanShadow(s) => self.run_has_bean_shadow(s).map(Actor::HasBeanShadow),
+                Actor::FireworkColors(c) => self.run_firework_colors(c).map(Actor::FireworkColors),
+                Actor::FireworkSpawner(s) => self.run_firework_spawner(s).map(Actor::FireworkSpawner),
+                Actor::FireworkSpark(s) => self.run_firework_spark(s).map(Actor::FireworkSpark),
+                Actor::Dawn(d) => self.run_dawn(d).map(Actor::Dawn),
+                Actor::Epilogue(e) => self.run_epilogue(slot, e).map(Actor::Epilogue),
+                Actor::CreditLine(l) => self.run_credit_line(l).map(Actor::CreditLine),
                 Actor::FfuzzyPalette(p) => self.run_ffuzzy_palette(p).map(Actor::FfuzzyPalette),
                 Actor::PaletteFade(pf) => self.run_palette_fade(pf).map(Actor::PaletteFade),
                 Actor::Star(st) => self.run_star(st).map(Actor::Star),

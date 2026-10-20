@@ -77,6 +77,9 @@ impl Engine {
         }
         loop {
             let pc = self.bytecode_pc;
+            if pc == BC_TITLE {
+                return Err(Unported("the title screen (bytecode $195C)"));
+            }
             let (op, arg) = (rom::word(pc), rom::word(pc + 2));
             self.bytecode_pc = pc + 4;
             let next_long = |e: &Engine| u32::from(arg) << 16 | u32::from(rom::word(e.bytecode_pc));
@@ -184,7 +187,16 @@ impl Engine {
             0xFF_1108 => self.repeat_times = ((value >> 8) as u8, value as u8),
             0xFF_1122 => self.input_lock = value,
             0xFF_1974 => self.level_transition = value,
-            0xFF_1972 => self.high_score_table = value as u8,
+            0xFF_FC02 => self.sound_test = value,
+            0xFF_0112 => {
+                self.level = (value >> 8) as u8;
+                self.opponent = value as u8;
+            }
+            0xFF_112A => self.use_lair = (value >> 8) as u8,
+            0xFF_1972 => {
+                self.high_score_table = (value >> 8) as u8;
+                self.high_score_both = value as u8 != 0;
+            }
             0xFF_05D2..=0xFF_0620 if at & 1 == 0 => self.vscroll[((at - 0xFF_05D2) / 2) as usize] = value,
             _ => return Err(Unported(Box::leak(format!("a bytecode write to ${at:06X}").into_boxed_str()))),
         }
@@ -207,7 +219,7 @@ impl Engine {
 
     /// The routines `BRUN` calls on the way between matches.
     fn run_routine(&mut self, at: u32, inputs: &Inputs) -> Result<(), Unported> {
-        if self.run_game_over_routine(at) || self.run_intro_routine(at)? {
+        if self.run_game_over_routine(at) || self.run_high_score_routine(at) || self.run_finale_routine(at) || self.run_credits_routine(at) || self.run_epilogue_routine(at) || self.run_intro_routine(at)? {
             return Ok(());
         }
         match at {

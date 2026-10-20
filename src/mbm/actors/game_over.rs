@@ -60,18 +60,23 @@ impl LetterPhase {
     }
 }
 
-/// `sub_EE10`: Robotnik's game over animation (+$32 script, +$22 frame time).
+/// `sub_EE10`: Robotnik in the game over and the ending (+$32 script, +$22 frame time;
+/// his frames DMAed from `DPLC_Robotnik_Opening`). `x` is the long at +$0A (the
+/// ending's ship carries him).
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct GameOverRobotnik {
+pub struct CutsceneRobotnik {
     pub started: bool,
     pub ptr: u32,
     pub time: u8,
     pub frame: u8,
+    pub mappings: u8,
+    pub x: u32,
+    pub y: u16,
+    /// +$06: the ending's piece hides him once off screen.
+    pub draw: u8,
 }
 
-pub const GAME_OVER_ROBOTNIK_CODE: u32 = 0xEE16;
-pub const GAME_OVER_ROBOTNIK_AT: (u16, u16) = (0xE8, 0x90);
-pub const GAME_OVER_ROBOTNIK_MAPPINGS: u8 = 0x1B;
+pub const CUTSCENE_ROBOTNIK_CODE: u32 = 0xEE16;
 pub const GAME_OVER_LETTER_MAPPINGS: u8 = 0x1F;
 
 /// `MapEni_GameOverRobots` (+ `byte_6A144`, its priority bits) and `MapEni_GameOverLight`.
@@ -91,17 +96,11 @@ impl Engine {
         match at {
             // sub_F71E: the robots (EniDecPrioMap).
             0xF71E => {
-                self.long_step();
-                self.eni_dec(ROBOTS_MAP, 0x2A0, 0x27, 0x1B, 0xC000);
-                for i in 0..0x28 * 0x1C {
-                    let bit = u16::from(rom::byte(ROBOTS_PRIORITY + i as u32) & 1) << 15;
-                    self.eni_buffer[i] |= bit;
-                }
+                self.eni_dec_prio_safe(ROBOTS_MAP, 0x2A0, 0x27, 0x1B, 0xC000, ROBOTS_PRIORITY);
             }
             // sub_F740: the light.
             0xF740 => {
-                self.long_step();
-                self.eni_dec(LIGHT_MAP, 0x22A0, 0x27, 0x0E, 0xE000);
+                self.eni_dec_safe(LIGHT_MAP, 0x22A0, 0x27, 0x0E, 0xE000);
             }
             0xDA90 => self.start_game_over(),
             _ => return false,
@@ -125,7 +124,8 @@ impl Engine {
         // sub_ED9C
         self.intro_cue = 0;
         if let Some(slot) = self.find_actor_slot() {
-            self.slots[slot] = Some(Actor::GameOverRobotnik(GameOverRobotnik { started: false, ptr: ROBOTNIK_SCRIPT, time: 0, frame: 0 }));
+            let r = CutsceneRobotnik { started: false, ptr: ROBOTNIK_SCRIPT, time: 0, frame: 0, mappings: 0x1B, x: 0xE8 << 16, y: 0x90, draw: 0x80 };
+            self.slots[slot] = Some(Actor::CutsceneRobotnik(r));
         }
     }
 
@@ -242,7 +242,7 @@ impl Engine {
         Some(l)
     }
 
-    pub(super) fn run_game_over_robotnik(&mut self, mut r: GameOverRobotnik) -> Option<GameOverRobotnik> {
+    pub(super) fn run_cutscene_robotnik(&mut self, mut r: CutsceneRobotnik) -> Option<CutsceneRobotnik> {
         if !r.started {
             r.started = true;
             return Some(r);

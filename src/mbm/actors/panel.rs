@@ -39,6 +39,8 @@ pub enum PanelCommand {
     Time(u16),
     /// $99: the results' bonus line, with the points left to add.
     Bonus(u16),
+    /// $91 (`SpecPlane91`): the role call's text box, `len` characters wide.
+    TextBox { len: u8, at: u16 },
     /// $92: the game over countdown's digit (`byte_66C9A`, 5 x 7 tiles).
     Countdown(u8),
 }
@@ -133,6 +135,19 @@ impl Engine {
                     self.result_line(2);
                     self.result_line(3);
                     self.result_number(BONUS_AT, points);
+                }
+                PanelCommand::TextBox { len, at } => {
+                    let row = self.plane_row();
+                    let rows = [(0xE011, 0xE012, 0xE811), (0xE013, 0xE500, 0xE813), (0xF011, 0xF012, 0xF811)];
+                    for (r, (left, mid, right)) in rows.into_iter().enumerate() {
+                        let start = at.wrapping_add(r as u16 * row);
+                        let mut words = vec![left];
+                        words.extend(std::iter::repeat(mid).take(usize::from(len)));
+                        words.push(right);
+                        for (i, w) in words.into_iter().enumerate() {
+                            self.plane_writes.push((start.wrapping_add(i as u16 * 2), w));
+                        }
+                    }
                 }
                 PanelCommand::Countdown(digit) => {
                     let from = COUNTDOWN_DIGITS + u32::from(digit) * 0x46;

@@ -66,6 +66,23 @@ impl Engine {
     }
 
     /// `EniDec`: decode a map into the buffer and make it the queue's first entry.
+    /// `EniDec_Safe`: the decode with interrupts off, so the vertical blanks it outlasts
+    /// come after its queue entry is set (the first of them copies the map).
+    pub(super) fn eni_dec_safe(&mut self, map: u32, base: u16, width: u16, height: u16, at: u16) {
+        self.eni_dec(map, base, width, height, at);
+        self.long_step();
+    }
+
+    /// `EniDec_PrioMap_Safe`: the same, with bit 15 of each word from a byte map.
+    pub(super) fn eni_dec_prio_safe(&mut self, map: u32, base: u16, width: u16, height: u16, at: u16, prio: u32) {
+        self.eni_dec(map, base, width, height, at);
+        for i in 0..usize::from(width + 1) * usize::from(height + 1) {
+            let bit = u16::from(rom::byte(prio + i as u32) & 1) << 15;
+            self.eni_buffer[i] |= bit;
+        }
+        self.long_step();
+    }
+
     pub(super) fn eni_dec(&mut self, map: u32, base: u16, width: u16, height: u16, at: u16) {
         let Some(rom) = rom::get() else { return };
         if let Ok((words, _)) = enigma::decompress(&rom[map as usize..], base) {

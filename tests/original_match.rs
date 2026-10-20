@@ -86,6 +86,7 @@ fn flow_from(e: &mut Engine, ram: &Ram) {
     e.intro_pause = ram.u8(0xFF_1126);
     e.text_tick = ram.u8(0xFF_1128);
     e.hblank_count = ram.u16(0xFF_5000);
+    e.clouds_slot = (ram.u32(0xFF_112C).wrapping_sub(0xFF_E000) / 0x40) as usize;
     e.repeat_times = (ram.u8(0xFF_1108), ram.u8(0xFF_1109));
     e.input_lock = ram.u16(0xFF_1122);
     e.level_transition = ram.u16(0xFF_1974);
@@ -187,6 +188,7 @@ fn globals_from(ram: &Ram) -> Engine {
     e.password = ram.u16(0xFF_111E);
     e.high_scores[..0xA0].copy_from_slice(ram.bytes(0xFF_FC04, 0xA0));
     e.high_score_table = ram.u8(0xFF_1972);
+    e.high_score_both = ram.u8(0xFF_1973) != 0;
     e.glow_xy = (ram.u16(0xFF_19AC), ram.u16(0xFF_19AE));
     e.icon_gen = [ram.u8(ICON_GEN), ram.u8(ICON_GEN + 1)];
     e.chaining = [ram.u8(CHAINING) != 0, ram.u8(CHAINING + 1) != 0];
@@ -224,7 +226,8 @@ fn mismatch_except(e: &Engine, ram: &Ram, skip: Option<usize>) -> Option<String>
     for slot in (0..SLOTS).filter(|&s| Some(s) != skip) {
         let a = slot_addr(slot);
         match &e.slots[slot] {
-            None if used(ram, slot) => {
+            // (with an actor left halfway, the ROM may already have what it spawns)
+            None if used(ram, slot) && skip.is_none() => {
                 return Some(format!("slot {slot:X}: ROM has actor ${:X} (tag {:02X}), we have nothing", ram.code(a), ram.u8(a)));
             }
             None => {}
@@ -240,11 +243,21 @@ fn mismatch_except(e: &Engine, ram: &Ram, skip: Option<usize>) -> Option<String>
             }
         }
     }
-    let (want, got) = (flow_snap_ram(ram), flow_snap(e));
+    let (mut want, got) = (flow_snap_ram(ram), flow_snap(e));
+    if skip.is_some() {
+        // (the half-run actor may already have set the scroll or the lair flag)
+        want.hscroll = got.hscroll.clone();
+        want.intro = got.intro;
+    }
     if want != got {
         return Some(format!("game flow
   ROM {want:X?}
   our {got:X?}"));
+    }
+    if skip.is_some() {
+        // The rest may show the half-run actor's first writes; it's all compared once
+        // that actor has finished.
+        return None;
     }
     let vscroll: [u16; 40] = std::array::from_fn(|i| ram.u16(VSCROLL + i as u32 * 2));
     if vscroll != e.vscroll {
@@ -389,7 +402,9 @@ fn run_from(
 ) -> Result<String, String> {
     // A frame the ROM's vertical blank cut in the middle of RunActors: the slots left,
     // and the vertical blanks seen while they haven't run yet (a long actor step).
-    let mut finishing: Option<(usize, u16)> = None;
+    // (with the original's resume address of the actor at the cut when that actor took
+    // a long step: it's still running until that changes)
+    let mut finishing: Option<(usize, u16, Option<u32>)> = None;
     // A logic frame whose bytecode run spans several video frames (art decompression):
     // we run it at once, then only the ROM's vertical blanks until it's done.
     let mut pending: Option<(Inputs, u16)> = None;
@@ -417,17 +432,19 @@ fn run_from(
             }
             if let Some(m) = mismatch(&engine, cur) {
                 // It may also have been cut in the middle of RunActors.
-                let cut = (1..SLOTS).find_map(|cut| {
+                let try_cut = |cut: usize, exact: bool| {
                     let mut t = before.clone();
                     t.deferred_vblanks = during;
                     t.run_bytecode(&started).ok()?;
                     t.long_step();
                     t.run_slots(0..cut, &started).ok()?;
-                    (mismatch(&t, cur).is_none() || mismatch_except(&t, cur, Some(cut)).is_none()).then_some((cut, t))
-                });
+                    let ok = if exact { mismatch(&t, cur).is_none() } else { mismatch_except(&t, cur, Some(cut)).is_none() };
+                    ok.then_some((cut, t))
+                };
+                let cut = (0..SLOTS).find_map(|cut| try_cut(cut, true)).or_else(|| (0..SLOTS).rev().find_map(|cut| try_cut(cut, false)));
                 let Some((cut, t)) = cut else { return Err(format!("frame {f} (end of a long bytecode frame): {m}")) };
                 engine = t;
-                finishing = Some((cut, 0));
+                finishing = Some((cut, 0, None));
                 run.split += 1;
                 continue;
             }
@@ -450,14 +467,19 @@ fn run_from(
             pending = Some((inputs, 0));
             continue;
         }
-        if let Some((cut, seen)) = finishing.take() {
+        if let Some((cut, seen, long_code)) = finishing.take() {
             let flow_of = |r: &Ram| (r.u32(0xFF_0A36), r.u8(0xFF_0A3B));
             let vblanks = cur.u16(FRAME_COUNT).wrapping_sub(prev.u16(FRAME_COUNT));
-            if prev.bytes(0xFF_E000, 0x1000) == cur.bytes(0xFF_E000, 0x1000) && flow_of(prev) == flow_of(cur) {
+            if std::env::var("MBM_CUT_DEBUG").is_ok() {
+                eprintln!("frame {f}: finishing at {cut:X}? same actors {}", prev.bytes(0xFF_E000, 0x1000) == cur.bytes(0xFF_E000, 0x1000));
+            }
+            let unchanged = prev.bytes(0xFF_E000, 0x1000) == cur.bytes(0xFF_E000, 0x1000) && flow_of(prev) == flow_of(cur);
+            if unchanged || long_code == Some(cur.code(slot_addr(cut))) {
                 // Still in the long step of the actor at the cut.
-                finishing = Some((cut, seen + vblanks));
+                finishing = Some((cut, seen + vblanks, long_code));
                 continue;
             }
+            let before = engine.clone();
             for _ in 1..seen + vblanks {
                 engine.vblank();
             }
@@ -466,7 +488,68 @@ fn run_from(
                 return Ok(format!("frame {f}: {what}"));
             }
             if let Some(m) = mismatch(&engine, cur) {
-                return Err(format!("frame {f}, finishing a split frame at slot {cut:X}: {m}"));
+                // Or the long frame ended before the last vertical blank, and the next
+                // logic frame is already in the same actor's next long step.
+                // (or the vertical blank came after the long frame ended)
+                let after = {
+                    let mut t = before.clone();
+                    for _ in 1..seen + vblanks {
+                        t.vblank();
+                    }
+                    t.run_slots(cut..SLOTS, &inputs).is_ok().then(|| {
+                        t.vblank();
+                        t
+                    })
+                };
+                if let Some(t) = after.filter(|t| mismatch(t, cur).is_none()) {
+                    engine = t;
+                    run.frames += 1;
+                    on_frame(f, &mut engine, cur)?;
+                    continue;
+                }
+                // (or the rest of the frame was cut again, at a later slot)
+                let again = |k: usize, exact: bool| {
+                    let mut t = before.clone();
+                    for _ in 0..seen + vblanks {
+                        t.vblank();
+                    }
+                    t.run_slots(cut..k, &inputs).ok()?;
+                    let ok = if exact { mismatch(&t, cur).is_none() } else { mismatch_except(&t, cur, Some(k)).is_none() };
+                    ok.then_some((k, t))
+                };
+                let later = (cut + 1..SLOTS).find_map(|k| again(k, true)).or_else(|| (cut + 1..SLOTS).rev().find_map(|k| again(k, false)));
+                if let Some((k, t)) = later {
+                    engine = t;
+                    finishing = Some((k, 0, None));
+                    run.split += 1;
+                    continue;
+                }
+                let next = long_code.and_then(|_| {
+                    let mut t = before.clone();
+                    for _ in 1..seen + vblanks {
+                        t.vblank();
+                    }
+                    t.run_slots(cut..SLOTS, &inputs).ok()?;
+                    t.vblank();
+                    t.run_bytecode(&inputs).ok()?;
+                    t.long_step();
+                    t.long_actor = None;
+                    t.run_slots(0..cut, &inputs).ok()?;
+                    match mismatch_except(&t, cur, Some(cut)) {
+                        None => Some(Ok(t)),
+                        Some(m2) => Some(Err(m2)),
+                    }
+                });
+                let t = match next {
+                    Some(Ok(t)) => t,
+                    Some(Err(m2)) => return Err(format!("frame {f}, finishing a split frame at slot {cut:X}: {m}
+(or into the next long step: {m2})")),
+                    None => return Err(format!("frame {f}, finishing a split frame at slot {cut:X}: {m}")),
+                };
+                engine = t;
+                finishing = Some((cut, 0, Some(cur.code(slot_addr(cut)))));
+                run.split += 1;
+                continue;
             }
             run.frames += 1;
             on_frame(f, &mut engine, cur)?;
@@ -476,13 +559,24 @@ fn run_from(
         let flow_state = |r: &Ram| (r.u32(0xFF_0A36), r.u8(0xFF_0A3B), r.bytes(0xFF_0622, 0x400).to_vec());
         if prev.bytes(0xFF_E000, 0x1000) == cur.bytes(0xFF_E000, 0x1000) && flow_state(prev) == flow_state(cur) {
             // Lag: the vertical blank still ran (clock, plane commands, one Random).
-            engine.vblank();
-            if let Some(m) = mismatch(&engine, cur) {
-                return Err(format!("frame {f} (lag frame): {m}"));
+            // (Unless an actor began a long step whose first writes show: then it's a
+            // split frame, below.)
+            let mut t = engine.clone();
+            t.vblank();
+            match mismatch(&t, cur) {
+                None => {
+                    engine = t;
+                    run.lag += 1;
+                    on_frame(f, &mut engine, cur)?;
+                    continue;
+                }
+                Some(m) => {
+                    let mut probe = engine.clone();
+                    if probe.frame(&inputs).is_err() || probe.long_actor.is_none() {
+                        return Err(format!("frame {f} (lag frame): {m}"));
+                    }
+                }
             }
-            run.lag += 1;
-            on_frame(f, &mut engine, cur)?;
-            continue;
         }
         let before = engine.clone();
         let pieces_before = count_pairs(&engine);
@@ -493,7 +587,7 @@ fn run_from(
         }
         if f == start + 1 && mismatch(&engine, cur).is_some() {
             // The snapshot we started from caught a split frame: its remaining slots run now.
-            let finish = (1..SLOTS).find_map(|cut| {
+            let finish = (0..SLOTS).find_map(|cut| {
                 let mut t = before.clone();
                 t.vblank();
                 t.run_slots(cut..SLOTS, &inputs).ok()?;
@@ -523,17 +617,35 @@ fn run_from(
             // (between actors, or in the middle of actor `cut`, which then shows half done).
             // (MBM_NO_SPLIT: report the mismatch instead, for debugging.)
             let no_split = std::env::var("MBM_NO_SPLIT").is_ok();
-            let cut = (1..SLOTS).filter(|_| !no_split).find_map(|cut| {
+            // (an exact match at any cut first, then the last cut that matches with the
+            // half-run actor left out: earlier cuts can match by accident when the
+            // actors before it didn't change this frame)
+            let try_cut = |cut: usize, exact: bool| {
                 let mut t = before.clone();
                 t.vblank();
+                t.run_bytecode(&inputs).ok()?;
+                t.long_step();
                 t.run_slots(0..cut, &inputs).ok()?;
-                let ok = mismatch(&t, cur).is_none() || mismatch_except(&t, cur, Some(cut)).is_none();
+                let ok = if exact { mismatch(&t, cur).is_none() } else { mismatch_except(&t, cur, Some(cut)).is_none() };
                 ok.then_some((cut, t))
-            });
+            };
+            // An actor that decompressed art this frame may be the one cut halfway.
+            let long = engine.long_actor.filter(|_| !no_split);
+            let cut = if no_split {
+                None
+            } else {
+                long.and_then(|s| try_cut(s, false))
+                    .or_else(|| (0..SLOTS).find_map(|cut| try_cut(cut, true)))
+                    .or_else(|| (0..SLOTS).rev().find_map(|cut| try_cut(cut, false)))
+            };
             match cut {
                 Some((cut, t)) => {
+                    if std::env::var("MBM_CUT_DEBUG").is_ok() {
+                        eprintln!("frame {f}: split at slot {cut:X}");
+                    }
+                    let long_code = (long == Some(cut)).then(|| cur.code(slot_addr(cut)));
                     engine = t;
-                    finishing = Some((cut, 0));
+                    finishing = Some((cut, 0, long_code));
                     run.split += 1;
                 }
                 None => {
@@ -541,6 +653,8 @@ fn run_from(
                         for cut in 1..SLOTS {
                             let mut t = before.clone();
                             t.vblank();
+                            let _ = t.run_bytecode(&inputs);
+                            t.long_step();
                             if t.run_slots(0..cut, &inputs).is_ok() {
                                 eprintln!("cut {cut:X}: {:?}", mismatch_except(&t, cur, Some(cut)));
                             }
@@ -615,7 +729,10 @@ fn whole_matches_run_on_the_engine_alone() {
             // actors): the stage intro, the transition, the match after.
             let at_intro = |r: &Ram| r.u32(0xFF_0A36) == 0x1D3E && r.u8(0xFF_0A3B) == 0 && !r.actors().any(|a| used(r, slot_of(a)));
             let flow_start = f > 0 && at_intro(&all[f]) && !at_intro(&all[f - 1]) && !poked.contains(&f);
-            if !mid_match && !flow_start && (!waiting(&all[f]) || (f > 0 && waiting(&all[f - 1])) || poked.contains(&f)) {
+            // And one that starts on the high score table (its name entry, from a savestate).
+            let on_table = f == 0
+                && engine_from(&all[0]).is_ok_and(|e| e.slots.iter().flatten().any(|a| matches!(a, Actor::HighScoreTable(_) | Actor::TableNameEntry(_))));
+            if !mid_match && !flow_start && !on_table && (!waiting(&all[f]) || (f > 0 && waiting(&all[f - 1])) || poked.contains(&f)) {
                 continue;
             }
             matches += 1;
@@ -883,6 +1000,13 @@ fn screen_against(
             }
         };
         let mut check = |f: usize, e: &mut Engine, _: &Ram| -> Result<(), String> {
+            if let Ok(r) = std::env::var("MBM_VRAM_DEBUG") {
+                let (a, b) = r.split_once('-').unwrap();
+                if (a.parse::<usize>().unwrap()..=b.parse::<usize>().unwrap()).contains(&f) {
+                    let ev: Vec<String> = e.vdp_events.iter().map(|v| format!("{}@{}", match &v.what { VdpOp::Words { at, words } => format!("Words({at:04X}x{})", words.len()), o => format!("{o:X?}") }, v.at)).collect();
+                    eprintln!("[vram] frame {f}: pc {:X} writes {} eni_queue {:X?} events {ev:?}", e.bytecode_pc, e.plane_writes.len(), e.eni_queue);
+                }
+            }
             apply(e);
             let Some(snap) = snaps.get(&f) else { return Ok(()) };
             let want = &snap[8 + 0x10000..8 + 0x20000];

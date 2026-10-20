@@ -100,6 +100,10 @@ fn enigma_matches_the_games_decoder() {
                 if cur.code(a) != 0x60FE || p.code(a) != 0x60FE || cur.u32(a + 0x32) == p.u32(a + 0x32) {
                     continue;
                 }
+                // (in the ending's role call other maps share the buffer that frame)
+                if cur.u16(0xFF_1124) != 0 {
+                    continue;
+                }
                 let map = long(cur.u32(a + 0x32) - 4);
                 let base = cur.u16(a + 0x2A) | cur.u16(a + 0x0A);
                 let (words, _) = enigma::decompress(&rom[map as usize..], base).unwrap();
@@ -145,7 +149,21 @@ fn sprite_mappings_match_draw_actors() {
                 if ram.u8(a) & mask == 0 || ram.u8(a + 6) & 0x80 == 0 {
                     continue;
                 }
-                for s in sprites::place(&rom, ram.u8(a + 8), ram.u8(a + 9), ram.u16(a + 0x0A), ram.u16(a + 0x0E), vscroll) {
+                let (mappings, frame) = (ram.u8(a + 8), ram.u8(a + 9));
+                // (mapping list 7's frames are in RAM: the ending's lines of text)
+                let placed = if mappings == 7 && frame < 8 {
+                    let at = 0xFF_1446 + u32::from(frame) * 0xA2;
+                    let pieces = (0..u32::from(ram.u16(at)))
+                        .map(|i| {
+                            let p = at + 2 + i * 8;
+                            sprites::Piece { y: ram.u16(p), size: ram.u8(p + 2), layer: ram.u8(p + 3), tile: ram.u16(p + 4), x: ram.u16(p + 6) }
+                        })
+                        .collect();
+                    sprites::place_pieces(pieces, ram.u16(a + 0x0A), ram.u16(a + 0x0E), vscroll)
+                } else {
+                    sprites::place(&rom, mappings, frame, ram.u16(a + 0x0A), ram.u16(a + 0x0E), vscroll)
+                };
+                for s in placed {
                     if ours.len() + 1 >= sprites::MAX_SPRITES {
                         break 'actors;
                     }

@@ -174,6 +174,9 @@ pub struct Portrait {
     /// +$32: next entry; the map last decoded (for drawing).
     pub next: u32,
     pub map: u32,
+    /// +$2A | +$0A: the maps' tile base and plane; +$0C: where on it.
+    pub tile: u16,
+    pub at: u16,
 }
 
 pub const PORTRAIT_CODE: u32 = 0x60FE;
@@ -523,7 +526,7 @@ impl Engine {
         p.shown = p.shown.wrapping_add(1);
         p.wait = time as u8;
         p.map = rom::long(at);
-        self.eni_dec(p.map, 0xE400, 9, 6, 0xC61E); // queued for the vertical blank
+        self.eni_dec(p.map, p.tile, 9, 6, p.at); // queued for the vertical blank
         p.next = at + 4;
         Some(p)
     }
