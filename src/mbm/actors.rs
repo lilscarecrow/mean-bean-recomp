@@ -802,6 +802,27 @@ fn run_piece(mut p: Piece) -> Option<Piece> {
     Some(p)
 }
 
+/// One `SpecPlane89` step of the falling beans: whether any were left, and the beans to
+/// draw this step (from the bottom right cell back to the top left, like the game).
+fn fall_steps(work: &mut PopWork) -> (bool, Vec<(FallingBean, BeanColor)>) {
+    let mut any = false;
+    let mut steps = vec![];
+    let backup = &work.backup;
+    work.falling.retain_mut(|b| {
+        any = true;
+        let drop_steps = b.rows * 2;
+        if b.counter >= drop_steps && b.counter - drop_steps + 1 >= b.bounce {
+            return false; // reached the end marker
+        }
+        let color = backup.get(b.col as i16, b.row as i16).unwrap_or(BeanColor::Garbage);
+        steps.push((*b, color));
+        b.counter += 1;
+        true
+    });
+    steps.sort_by_key(|(b, _)| std::cmp::Reverse((b.row, b.col)));
+    (any, steps)
+}
+
 /// `sub_9C64`: points go to the score (capped) and the garbage accumulator (capped
 /// at 65,535).
 fn add_points(p: &mut Player, points: u32) {
@@ -877,6 +898,9 @@ pub struct Engine {
     /// Plane commands $89 (post-pop fall animation) queued this frame, by player slot;
     /// the vertical-blank handler runs them before the next frame's actors.
     pub fall_commands: Vec<usize>,
+    /// A deleted player's falling beans whose `$89` step was still queued (the ROM keeps
+    /// them in the field, `pUnk6`): (its slot, player id, the work).
+    pub orphan_fall: Option<(usize, u8, PopWork)>,
     /// The game's random number generator (`rng_seed`).
     pub rng: Rng,
     /// `Random` calls made during the last frame (vertical blank included).
@@ -976,6 +1000,7 @@ impl Engine {
             level_mode: 0,
             difficulty: 0,
             fall_commands: vec![],
+            orphan_fall: None,
             rng: Rng::new(0),
             rng_calls: 0,
             glow_xy: (0, 0),
@@ -1058,28 +1083,24 @@ impl Engine {
     /// `SpecPlane89`: one step of every bean falling after a pop. The flag stays set
     /// while any bean was still moving at the start of the step.
     fn run_fall_command(&mut self, player_slot: usize) {
+        if !matches!(self.slots[player_slot], Some(Actor::Player(_))) {
+            // The player was deleted after queueing it: the step still runs on its field.
+            if let Some((_, id, mut work)) = self.orphan_fall.take().filter(|o| o.0 == player_slot) {
+                let (_, steps) = fall_steps(&mut work);
+                for (b, color) in steps {
+                    self.draw_fall_step(usize::from(id & 1), &b, color);
+                }
+            }
+            return;
+        }
         let p = self.player_mut(player_slot);
         p.flags &= !FALLING_AFTER_POP;
         let id = p.id as usize & 1;
         let Some(work) = p.pop.as_mut() else { return };
-        let mut any = false;
-        let mut steps = vec![];
-        work.falling.retain_mut(|b| {
-            any = true;
-            let drop_steps = b.rows * 2;
-            if b.counter >= drop_steps && b.counter - drop_steps + 1 >= b.bounce {
-                return false; // reached the end marker
-            }
-            let color = work.backup.get(b.col as i16, b.row as i16).unwrap_or(BeanColor::Garbage);
-            steps.push((*b, color));
-            b.counter += 1;
-            true
-        });
+        let (any, steps) = fall_steps(work);
         if any {
             p.flags |= FALLING_AFTER_POP;
         }
-        // Drawn from the bottom right cell back to the top left, like the game.
-        steps.sort_by_key(|(b, _)| std::cmp::Reverse((b.row, b.col)));
         for (b, color) in steps {
             self.draw_fall_step(id, &b, color);
         }
@@ -1434,7 +1455,15 @@ impl Engine {
         let mut plan = player_plan(p);
         let mut scratch = ai::PlanScratch::default();
         let before = self.rng;
-        let res = ai::plan(&self.ai_fields[id], &ctx, &mut self.cpu_memory[id], &mut plan, &mut scratch, &mut self.rng);
+        // Pattern play may rewrite the pairs in the holder and the bean order.
+        let deal = match p.holder_slot.and_then(|h| self.slots[h].as_mut()) {
+            Some(Actor::PairHolder(h)) => {
+                let next = (h.w20 >> 8) as u8;
+                Some(ai::Deal { pairs: &mut h.pairs, order: &mut self.bean_orders[id & 1], next })
+            }
+            _ => None,
+        };
+        let res = ai::plan(&self.ai_fields[id], &ctx, &mut self.cpu_memory[id], &mut plan, &mut scratch, &mut self.rng, deal);
         self.note_draws(before);
         res.map_err(Unported)?;
         set_player_plan(p, plan);
@@ -2079,7 +2108,9 @@ impl Engine {
     fn follow(&mut self, s: &mut Satellite) {
         let pivot = self.pivot_mut(s.pivot_slot);
         let angle = pivot.pair.sat_angle;
-        let (px, py) = (pivot_x(pivot), (pivot.y >> 16) as u16);
+        // A pivot in a later slot that hasn't run yet still has x (and y) 0.
+        let px = if pivot.state == PivotState::Init { 0 } else { pivot_x(pivot) };
+        let py = (pivot.y >> 16) as u16;
         s.x = px.wrapping_add((sin(angle, 0x1000) >> 16) as u16);
         let y = py.wrapping_sub((cos(angle, 0x1000) >> 16) as u16);
         s.y = (u32::from(y) << 16) | (s.y & 0xFFFF);

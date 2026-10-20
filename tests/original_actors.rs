@@ -143,6 +143,8 @@ fn first_mismatch(engine: &Engine, cur: &Ram, tag: u8, player: usize) -> Option<
 #[derive(Default)]
 struct Stats {
     pieces: usize,
+    /// Piece starts skipped because the pair was already falling.
+    in_flight: usize,
     frames: usize,
     unported: std::collections::BTreeMap<&'static str, usize>,
     falls: usize,
@@ -234,6 +236,15 @@ fn check_piece(
     }
     // The next pair, as the ROM spawned it.
     let spawn = (start..all.len().min(start + 2000)).find(|&f| all[f].pair(tag, false).is_some())?;
+    let in_play = (0..SLOTS).any(|sl| {
+        let a = slot_addr(sl);
+        used(ram, sl) && ram.u8(a) == tag && (0x4F00..0x5600).contains(&ram.code(a)) && load(ram, sl, tag).is_none()
+    });
+    if spawn == start || in_play {
+        // A pair is still in play (a quick CPU): it can't be rebuilt from RAM.
+        stats.in_flight += 1;
+        return Some(start + 1);
+    }
     if spawn + 1 >= all.len() {
         return None; // the recording ends first
     }
@@ -400,6 +411,7 @@ fn check_piece(
         };
         let exact = first_mismatch(&engine, cur, tag, player).is_none();
         let mut verdict = None;
+        let mut icon_only = false;
         if exact && engine.rng.seed == rom_seed {
             verdict = Some("exact");
         } else if exact && rom_calls.is_some_and(|n| n > engine.rng_calls) {
@@ -410,8 +422,17 @@ fn check_piece(
             for split in splits(n - ours, users.len()) {
                 let mut trial = before.clone();
                 trial.rng = Rng::new(prev.u32(RNG_SEED));
-                trial.foreign_random = users.iter().copied().zip(split).collect();
-                if trial.frame(&inputs).is_ok() && trial.rng_calls == ours && first_mismatch(&trial, cur, tag, player).is_none() {
+                trial.foreign_random = users.iter().copied().zip(split.clone()).collect();
+                let ran = trial.frame(&inputs);
+                let trip = first_mismatch(&trial, cur, tag, player);
+                if std::env::var("MBM_RNG_DEBUG").is_ok() {
+                    eprintln!("frame {f} split {split:?} users {users:?}: {:?} calls {} vs {ours}: {:?}", ran, trial.rng_calls, trip);
+                }
+                // The other (unported) side can take garbage icons away this test can't follow.
+                icon_only |= ran.is_ok()
+                    && trial.rng_calls == ours
+                    && trip.as_deref().is_some_and(|m| m.starts_with("slot ") && m.contains("our \"icon "));
+                if ran.is_ok() && trial.rng_calls == ours && trip.is_none() {
                     engine = trial;
                     verdict = Some("resolved");
                     break;
@@ -459,6 +480,10 @@ fn check_piece(
                 stats.rng_resolved += 1;
             }
             Some(_) => stats.split_frames += 1,
+            None if icon_only => {
+                *stats.unported.entry("garbage icons the other side took away").or_default() += 1;
+                return Some(f);
+            }
             None => {
                 let m = first_mismatch(&engine, cur, tag, player)
                     .unwrap_or_else(|| format!("we drew {} random numbers, the ROM {:?}", engine.rng_calls, rom_calls));

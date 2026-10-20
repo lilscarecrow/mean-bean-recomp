@@ -10,6 +10,7 @@ use super::pair::{PadInput, PadSource, Pair, RotateKeys, PAD_A, PAD_C};
 use super::bean_order::BeanColor;
 use super::field::{Field, COLS, HIDDEN_ROWS, ROWS};
 use super::rng::Rng;
+use super::rom;
 
 /// High byte of a garbage cell: color 6 with link bits $D, as the game writes it.
 const GARBAGE_CELL: u8 = 0xED;
@@ -394,6 +395,105 @@ pub struct PlanScratch {
     pub scores: [u16; 24],
 }
 
+/// What pattern play rewrites: the pairs waiting in the CPU's pair holder (+$26..+$2B),
+/// its bean order, and where the holder deals from next (its +$20).
+pub struct Deal<'a> {
+    pub pairs: &'a mut [u8; 6],
+    pub order: &'a mut [u8; 256],
+    pub next: u8,
+}
+
+/// `off_1317C`: the patterns (pointers), `record[6]` of them per opponent. A pattern:
+/// columns needed, height needed, 2 bytes of pairs for the holder, bytes of pairs for
+/// the bean order up to a negative byte, then placements (column offset << 4 |
+/// rotation) up to a negative byte. Pair bytes hold two nibbles, color slots of a
+/// shuffled palette (`byte_130A6`: 0, 1, 3, 4, 5).
+const PATTERNS: u32 = 0x1317C;
+const PATTERN_COLORS: [u8; 5] = [0, 1, 3, 4, 5];
+
+/// `sub_12FAE` past the "after 8 pieces" check: carry on with the pattern being played
+/// (`loc_12FD8`), or pick one at random and look for a run of equally high columns for
+/// it (`loc_13142`, `sub_13006`); if there is one, place this pair beside it
+/// (`sub_13060`) and deal the pattern's colors (`sub_130AC`). True when the pattern
+/// decided the placement.
+fn pattern_play(f: &AiField, rec: [u8; 8], mem: &mut CpuMemory, p: &mut Plan, rng: &mut Rng, deal: Deal<'_>) -> bool {
+    let set_ptr = |mem: &mut CpuMemory, at: u32| mem[4..8].copy_from_slice(&at.to_be_bytes());
+    if mem[1] != 0 {
+        let mut at = u32::from_be_bytes([mem[4], mem[5], mem[6], mem[7]]);
+        let b = rom::byte(at);
+        p.col = (b >> 4).wrapping_add(mem[2]);
+        p.rot = b & 0x0F;
+        at += 1;
+        set_ptr(mem, at);
+        if rom::byte(at) & 0x80 != 0 {
+            mem[1] = 0;
+        }
+        return true;
+    }
+    let pick = rng.below(u16::from(rec[6]));
+    let mut at = rom::long(PATTERNS + u32::from(pick) * 4);
+    let (need, height) = (rom::byte(at), rom::byte(at + 1));
+    at += 2;
+    // sub_13006: equal heights (free rows) at least `height`, `need` of them.
+    let free = |d0: u8| f.bytes[off::UNK3 + usize::from(d0)];
+    let (mut run, mut last) = (0u8, 0xFFu8);
+    let mut end = None;
+    for d0 in (0..12u8).step_by(2) {
+        let h = free(d0);
+        if h >= height {
+            run = run.wrapping_add(1);
+            if h != last {
+                mem[8] = d0;
+                run = 1;
+                last = h;
+            }
+        }
+        if run == need {
+            end = Some(d0);
+            break;
+        }
+    }
+    let Some(end) = end else { return false };
+    mem[9] = end;
+    // sub_13060: this pair goes in the emptiest column outside the run.
+    let mut best = 0u8;
+    for d2 in (0..12u8).step_by(2) {
+        if (d2 < mem[8] || end < d2) && free(d2) >= best {
+            best = free(d2);
+            p.col = d2 >> 1;
+        }
+    }
+    p.rot = 0;
+    mem[2] = mem[8] >> 1;
+    // sub_130AC (sub_13120 shuffles the colors).
+    let mut colors = PATTERN_COLORS;
+    for d1 in (0..5usize).rev() {
+        let d0 = usize::from(rng.below(5));
+        colors.swap(d0, d1);
+    }
+    let color = |n: u8| colors.get(usize::from(n)).copied().unwrap_or(0);
+    for k in 0..2 {
+        let b = rom::byte(at);
+        at += 1;
+        deal.pairs[2 + k * 2] = color(b >> 4);
+        deal.pairs[3 + k * 2] = color(b & 0x0F);
+    }
+    let mut i = deal.next;
+    loop {
+        let b = rom::byte(at);
+        at += 1;
+        if b & 0x80 != 0 {
+            break;
+        }
+        deal.order[usize::from(i)] = color(b >> 4);
+        deal.order[usize::from(i.wrapping_add(1))] = color(b & 0x0F);
+        i = i.wrapping_add(2);
+    }
+    set_ptr(mem, at);
+    mem[1] = 0xFF;
+    true
+}
+
 pub fn record_for(player_id: u8, opponent: u8) -> [u8; 8] {
     // sub_12562
     RECORDS[if player_id == 0 { 5 } else { opponent as usize & 15 }]
@@ -417,6 +517,7 @@ pub fn plan(
     p: &mut Plan,
     scratch: &mut PlanScratch,
     rng: &mut Rng,
+    deal: Option<Deal<'_>>,
 ) -> Result<(), &'static str> {
     let rec = record_for(ctx.player_id, ctx.opponent);
     let count = f.word(off::COUNT) as u8; // 9(a4): low byte of pCount
@@ -441,12 +542,15 @@ pub fn plan(
     p.pause_frames = timer(rec[2], rng);
     p.phase = 0;
     p.timer = 0;
-    // sub_12FAE: pattern play (a few opponents)
+    // sub_12FAE: pattern play (opponents with patterns, while building)
     if rec[6] & 0x80 == 0 && mode == 0 {
         if mem[3] < 8 {
             mem[3] += 1;
         } else {
-            return Err("CPU pattern play (sub_12FAE)");
+            let deal = deal.ok_or("CPU pattern play without the pair holder")?;
+            if pattern_play(f, rec, mem, p, rng, deal) {
+                return Ok(()); // the pattern placed the pair: sub_127BA returns
+            }
         }
     }
     // sub_126DE: openings

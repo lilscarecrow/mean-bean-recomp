@@ -127,7 +127,11 @@ fn scratch_of(ram: &Ram) -> ai::PlanScratch {
 /// number of other draws in the same frame, so the RNG offset is searched.
 #[test]
 fn planner_matches_the_original() {
-    let (mut plans, mut patterns, mut openings) = (0, 0, 0);
+    // (pattern play reads its patterns from the ROM)
+    if !support::install_rom() {
+        return;
+    }
+    let (mut plans, mut patterns, mut openings, mut pattern_plans) = (0, 0, 0, 0);
     for path in recordings() {
         let poked = support::poked_frames(&path);
         let mut prev: Option<Ram> = None;
@@ -155,7 +159,10 @@ fn planner_matches_the_original() {
                     pair: (p.u8(preview + 0x26), p.u8(preview + 0x27)),
                 };
                 let field = field_bytes(&p, i);
-                let want = (plan_of(cur, b), cur.bytes(CPU_MEMORY[i], 10).to_vec(), scratch_of(cur));
+                // What pattern play may rewrite: the holder's pairs and the bean order.
+                let order_at = 0xFF_123E + u32::from(id & 1) * 0x100;
+                let dealt = |r: &Ram| (r.bytes(preview + 0x26, 6).to_vec(), r.bytes(order_at, 256).to_vec());
+                let want = (plan_of(cur, b), cur.bytes(CPU_MEMORY[i], 10).to_vec(), scratch_of(cur), dealt(cur));
                 let seed = p.u32(support::addr::RNG_SEED);
                 let mut outcome = None;
                 let mut rng = Rng::new(seed);
@@ -164,12 +171,18 @@ fn planner_matches_the_original() {
                     let mut plan = plan_of(&p, a);
                     let mut mem: ai::CpuMemory = p.bytes(CPU_MEMORY[i], 10).try_into().unwrap();
                     let mut scratch = scratch_of(&p);
-                    let res = ai::plan(&field, &ctx, &mut mem, &mut plan, &mut scratch, &mut r);
+                    let (mut pairs, mut order) = dealt(&p);
+                    let mut pairs6: [u8; 6] = pairs[..].try_into().unwrap();
+                    let mut order256: [u8; 256] = order[..].try_into().unwrap();
+                    let deal = ai::Deal { pairs: &mut pairs6, order: &mut order256, next: p.u8(preview + 0x20) };
+                    let res = ai::plan(&field, &ctx, &mut mem, &mut plan, &mut scratch, &mut r, Some(deal));
                     if res.is_err() {
                         outcome = Some(Err(()));
                         break;
                     }
-                    let got = (plan, mem.to_vec(), scratch);
+                    pairs = pairs6.to_vec();
+                    order = order256.to_vec();
+                    let got = (plan, mem.to_vec(), scratch, (pairs, order));
                     let end = cur.u32(support::addr::RNG_SEED);
                     let reaches_end = (0..64).any(|_| {
                         let hit = r.seed == end;
@@ -182,9 +195,13 @@ fn planner_matches_the_original() {
                     }
                     rng.next();
                 }
+                let by_pattern = p.u8(CPU_MEMORY[i] + 1) != 0 || cur.u8(CPU_MEMORY[i] + 1) != 0;
                 match outcome {
                     Some(Ok(())) => {
                         plans += 1;
+                        if by_pattern {
+                            pattern_plans += 1;
+                        }
                         if ctx.opponent == 1 && field_bytes(cur, i).bytes[off::COUNT + 1] < 0x18 {
                             openings += 1;
                         }
@@ -195,7 +212,11 @@ fn planner_matches_the_original() {
                         let mut plan = plan_of(&p, a);
                         let mut mem: ai::CpuMemory = p.bytes(CPU_MEMORY[i], 10).try_into().unwrap();
                         let mut scratch = scratch_of(&p);
-                        let _ = ai::plan(&field, &ctx, &mut mem, &mut plan, &mut scratch, &mut r);
+                        let (pairs, order) = dealt(&p);
+                        let mut pairs6: [u8; 6] = pairs[..].try_into().unwrap();
+                        let mut order256: [u8; 256] = order[..].try_into().unwrap();
+                        let deal = ai::Deal { pairs: &mut pairs6, order: &mut order256, next: p.u8(preview + 0x20) };
+                        let _ = ai::plan(&field, &ctx, &mut mem, &mut plan, &mut scratch, &mut r, Some(deal));
                         panic!(
                             "{} frame {frame} P{} opp {}: planner differs\n ROM  {:?} mem {:02X?}\n ours {:?} mem {:02X?}\n ROM  scratch {:02X?} scores {:04X?}\n ours scratch {:02X?} scores {:04X?}",
                             path.display(),
@@ -215,7 +236,7 @@ fn planner_matches_the_original() {
             }
         }
     }
-    eprintln!("{plans} plans identical ({openings} Frankly openings), {patterns} pattern plans unported");
+    eprintln!("{plans} plans identical ({openings} Frankly openings, {pattern_plans} by pattern play), {patterns} refused");
 }
 
 /// The AI's view of a field rendered from the port's `Field` (colors only) must give

@@ -157,7 +157,7 @@ impl Engine {
         self.result_beans = 0;
         if p.id == 0 {
             // P2 won: the CPU's actor goes, P1's field falls away, then "continue?".
-            self.slots[p.other_slot] = None; // ActorDeleteOther
+            self.delete_player(p.other_slot); // ActorDeleteOther
             if self.opponent == OPP_ROBOTNIK {
                 return Err(Unported("Robotnik's victory voice (sub_7C14)"));
             }
@@ -179,7 +179,7 @@ impl Engine {
         if self.level == 0x0F || self.level == 2 {
             return Err(Unported("high score entry (sub_C438)"));
         }
-        self.slots[p.other_slot] = None; // ActorDeleteOther
+        self.delete_player(p.other_slot); // ActorDeleteOther
         if let Some(slot) = self.find_actor_slot() {
             self.slots[slot] = Some(Actor::Banner(Banner { state: BannerState::Start, timer: 0 }));
         }
@@ -190,6 +190,15 @@ impl Engine {
         self.wipe_field(p);
         p.state = PlayerState::Wipe;
         Ok(())
+    }
+
+    /// `ActorDeleteOther` on a player, keeping falling beans whose step is queued.
+    fn delete_player(&mut self, slot: usize) {
+        if let Some(Actor::Player(p)) = self.slots[slot].take() {
+            if let (true, Some(work)) = (self.fall_commands.contains(&slot), p.pop) {
+                self.orphan_fall = Some((slot, p.id, work));
+            }
+        }
     }
 
     /// `sub_7078`: four stars from the winner's field (left edge `x0`).

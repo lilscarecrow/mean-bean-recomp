@@ -221,9 +221,14 @@ fn mismatch_except(e: &Engine, ram: &Ram, skip: Option<usize>) -> Option<String>
   ROM {loads:04X?}
   our {:04X?}", e.palette_loads));
     }
+    // A fade actor cut in the middle shows its line's fade data already stepped.
+    let half_done_fade = skip.and_then(|s| match &e.slots[s] {
+        Some(Actor::PaletteFade(p)) => Some(usize::from(p.line)),
+        _ => None,
+    });
     for line in 0..4 {
         // (only lines that have faded: the rest is whatever an earlier screen left)
-        if e.pal_fades[line] != FadeData::default() && fades[line] != e.pal_fades[line] {
+        if Some(line) != half_done_fade && e.pal_fades[line] != FadeData::default() && fades[line] != e.pal_fades[line] {
             return Some(format!("line {line} fade data
   ROM {:02X?}
   our {:02X?}", fades[line], e.pal_fades[line]));
@@ -332,6 +337,21 @@ fn run_from(
             Err(Unported(what)) => return Ok(format!("frame {f}: {what}")),
             Ok(()) => {}
         }
+        if f == start + 1 && mismatch(&engine, cur).is_some() {
+            // The snapshot we started from caught a split frame: its remaining slots run now.
+            let finish = (1..SLOTS).find_map(|cut| {
+                let mut t = before.clone();
+                t.vblank();
+                t.run_slots(cut..SLOTS, &inputs).ok()?;
+                mismatch(&t, cur).is_none().then_some(t)
+            });
+            if let Some(t) = finish {
+                engine = t;
+                run.split += 1;
+                on_frame(f, &mut engine, cur)?;
+                continue;
+            }
+        }
         if mismatch(&engine, cur).is_some() {
             // A lag frame whose vertical blank wrote into an actor (a plane command
             // clearing a player's flag), so the actor area did change.
@@ -360,7 +380,18 @@ fn run_from(
                     finishing = Some(cut);
                     run.split += 1;
                 }
-                None => return Err(format!("frame {f} (match from {start}): {m}")),
+                None => {
+                    if std::env::var("MBM_CUT_DEBUG").is_ok() {
+                        for cut in 1..SLOTS {
+                            let mut t = before.clone();
+                            t.vblank();
+                            if t.run_slots(0..cut, &inputs).is_ok() {
+                                eprintln!("cut {cut:X}: {:?}", mismatch_except(&t, cur, Some(cut)));
+                            }
+                        }
+                    }
+                    return Err(format!("frame {f} (match from {start}): {m}"));
+                }
             }
         }
         run.pieces += count_pairs(&engine).saturating_sub(pieces_before);
@@ -519,11 +550,30 @@ fn start_from_settings(all: &[Ram], s: usize, poked: &std::collections::HashSet<
     }
     // loc_6070: the portrait and the stage's actors, then a frame of actors.
     e.vblank();
+    let staged = e.clone();
     if let Err(Unported(what)) = e.start_stage().and_then(|_| e.run_slots(0..SLOTS, &inputs_for(&all[f]))) {
         return Ok(Start::Stopped(what.to_string()));
     }
     if let Some(m) = mismatch(&e, &all[f]) {
-        return Err(fail(f, "loc_6070", m));
+        // loc_6070 and the actors may overrun the frame: the vertical blank comes in the
+        // middle of RunActors, and the rest of the slots run in the next video frame.
+        let cut = (1..SLOTS).find_map(|cut| {
+            let mut t = staged.clone();
+            t.start_stage().ok()?;
+            t.run_slots(0..cut, &inputs_for(&all[f])).ok()?;
+            (mismatch(&t, &all[f]).is_none() || mismatch_except(&t, &all[f], Some(cut)).is_none()).then_some((cut, t))
+        });
+        let Some((cut, t)) = cut.filter(|_| f + 1 < all.len()) else { return Err(fail(f, "loc_6070", m)) };
+        e = t;
+        after(&mut e);
+        f += 1;
+        e.vblank();
+        if let Err(Unported(what)) = e.run_slots(cut..SLOTS, &inputs_for(&all[f])) {
+            return Ok(Start::Stopped(what.to_string()));
+        }
+        if let Some(m) = mismatch(&e, &all[f]) {
+            return Err(fail(f, "loc_6070, finishing a split frame", m));
+        }
     }
     after(&mut e);
     Ok(Start::Running { engine: e, frame: f, opponent })
