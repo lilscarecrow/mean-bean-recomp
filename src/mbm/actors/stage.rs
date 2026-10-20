@@ -520,6 +520,7 @@ impl Engine {
         p.shown = p.shown.wrapping_add(1);
         p.wait = time as u8;
         p.map = rom::long(at);
+        self.portrait_map = Some(p.map); // EniDec queues it for the vertical blank
         p.next = at + 4;
         Some(p)
     }

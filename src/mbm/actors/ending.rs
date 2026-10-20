@@ -328,6 +328,7 @@ impl Engine {
                 p.w26 = if skip { p.w26 } else { p.w26.wrapping_sub(1) };
                 if skip || p.w26 == 0 {
                     add_points(p, u32::from(p.base));
+                    self.queue_panel(PanelCommand::Score(p.id));
                     self.show_password()?;
                     p.state = Continue; // the bookmark at $7E9E (no delay left)
                 } else if p.w26 < 0x780 && p.base != 0 {
@@ -335,6 +336,7 @@ impl Engine {
                     let step = p.base.min(p.w28);
                     p.base -= step;
                     add_points(p, u32::from(step));
+                    self.queue_panel(PanelCommand::Score(p.id));
                 }
             }
             NoBonusWait => {

@@ -119,6 +119,8 @@ impl Engine {
         if let Some(slot) = self.find_actor_slot() {
             self.slots[slot] = Some(Actor::Danger(Danger { spark_wait: 0, flash_wait: 0, flash: 0 }));
         }
+        // sub_3CDA: NEXT and SCORE.
+        self.queue_panel(PanelCommand::Text { entry: PANEL_LABELS, blink: 0, player: 0 });
         Ok(())
     }
 
@@ -134,6 +136,7 @@ impl Engine {
         self.fields[id] = Field::default(); // ResetPuyoField
         self.reset_field_bytes(id);
         add_points(p, 0); // sub_9C4A: draws the score
+        self.queue_panel(PanelCommand::Score(p.id));
         // sub_3F94 (scenario): ready at once (bit 0 set, then cleared again), at this
         // level's speed step.
         p.flags &= !1;
@@ -181,6 +184,9 @@ impl Engine {
     /// `loc_6070` + `sub_678E`: the opponent's portrait and their stage's actors (the
     /// bytecode runs it, then `RunActors`).
     pub fn start_stage(&mut self) -> Result<(), Unported> {
+        // Level_DrawSmallText runs next in the bytecode; nothing else it queues overlaps.
+        self.queue_panel(PanelCommand::StageText);
+        self.queue_panel(PanelCommand::Names);
         self.portrait_lock = 0;
         self.danger_flash = 0;
         self.crowding = 0;

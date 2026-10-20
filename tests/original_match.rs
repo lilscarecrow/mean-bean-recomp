@@ -382,6 +382,77 @@ fn match_setups(all: &[Ram]) -> Vec<usize> {
     (1..all.len()).filter(|&f| p1_at(&all[f], 0x3D80) && !any_p1(&all[f - 1])).collect()
 }
 
+enum Start {
+    /// Not a clean start (a scenario poked RAM, or actors left over).
+    Skipped,
+    /// Something not ported yet.
+    Stopped(String),
+    /// The stage started: the engine as of `frame`.
+    Running { engine: Engine, frame: usize, opponent: u8 },
+}
+
+/// The game flow's start of the match set up at frame `s`, from the settings and seed
+/// before `GenPuyoOrder`: the bean orders, loc_3C00, the portrait's frames, loc_6070.
+/// `after` sees the engine after every frame (to take its plane writes).
+fn start_from_settings(all: &[Ram], s: usize, poked: &std::collections::HashSet<usize>, after: &mut dyn FnMut(&mut Engine)) -> Result<Start, String> {
+    let orders = |r: &Ram| [r.bytes(BEAN_ORDERS[0], 256).to_vec(), r.bytes(BEAN_ORDERS[1], 256).to_vec()];
+    // GenPuyoOrder's frame: the last change of the bean orders before the setup.
+    let Some(g) = (s.saturating_sub(8)..s).rev().find(|&f| f > 0 && orders(&all[f]) != orders(&all[f - 1])) else {
+        return Ok(Start::Stopped("no GenPuyoOrder found".into()));
+    };
+    if (g - 1..=s).any(|f| poked.contains(&f)) || all[g - 1].actors().any(|a| used(&all[g - 1], slot_of(a))) {
+        return Ok(Start::Skipped);
+    }
+    let opponent = all[g - 1].u8(0xFF_0113);
+    let mut e = globals_from(&all[g - 1]);
+    let fail = |f: usize, what: &str, m: String| -> String { format!("frame {f} ({what}): {m}") };
+    // GenPuyoOrder, then the frames up to the setup.
+    e.vblank();
+    e.deal_bean_orders();
+    if let Some(m) = mismatch(&e, &all[g]) {
+        return Err(fail(g, "bean orders", m));
+    }
+    after(&mut e);
+    for f in g + 1..s {
+        e.vblank();
+        if let Some(m) = mismatch(&e, &all[f]) {
+            return Err(fail(f, "before the setup", m));
+        }
+        after(&mut e);
+    }
+    // loc_3C00 and the new actors' first frame.
+    e.vblank();
+    if let Err(Unported(what)) = e.start_match().and_then(|_| e.run_slots(0..SLOTS, &inputs_for(&all[s]))) {
+        return Ok(Start::Stopped(what.to_string()));
+    }
+    if let Some(m) = mismatch(&e, &all[s]) {
+        return Err(fail(s, "loc_3C00", m));
+    }
+    after(&mut e);
+    // A vertical blank, then the portrait art decompresses with interrupts off.
+    e.vblank();
+    if let Some(m) = mismatch(&e, &all[s + 1]) {
+        return Err(fail(s + 1, "before loc_6070", m));
+    }
+    after(&mut e);
+    let mut f = s + 2;
+    // (no vertical blank, no actors: the frame counter and the actor table stand still)
+    let still = |a: &Ram, b: &Ram| a.u16(FRAME_COUNT) == b.u16(FRAME_COUNT) && a.bytes(0xFF_E000, 0x1000) == b.bytes(0xFF_E000, 0x1000);
+    while f < all.len() && still(&all[f], &all[f - 1]) {
+        f += 1;
+    }
+    // loc_6070: the portrait and the stage's actors, then a frame of actors.
+    e.vblank();
+    if let Err(Unported(what)) = e.start_stage().and_then(|_| e.run_slots(0..SLOTS, &inputs_for(&all[f]))) {
+        return Ok(Start::Stopped(what.to_string()));
+    }
+    if let Some(m) = mismatch(&e, &all[f]) {
+        return Err(fail(f, "loc_6070", m));
+    }
+    after(&mut e);
+    Ok(Start::Running { engine: e, frame: f, opponent })
+}
+
 /// Matches built from nothing: the game flow's settings and seed from before
 /// `GenPuyoOrder`, no actors at all. The engine deals the bean orders, starts the match
 /// and the stage on the frames the bytecode does, then runs it to the end.
@@ -397,60 +468,20 @@ fn matches_start_from_the_settings_alone() {
         let poked = support::poked_frames(&path);
         let all: Vec<Ram> = frames(&path).collect();
         for s in match_setups(&all) {
-            let orders = |r: &Ram| [r.bytes(BEAN_ORDERS[0], 256).to_vec(), r.bytes(BEAN_ORDERS[1], 256).to_vec()];
-            // GenPuyoOrder's frame: the last change of the bean orders before the setup.
-            let Some(g) = (s.saturating_sub(8)..s).rev().find(|&f| f > 0 && orders(&all[f]) != orders(&all[f - 1])) else {
-                *stops.entry("no GenPuyoOrder found".into()).or_insert(0) += 1;
-                continue;
-            };
-            if (g - 1..=s).any(|f| poked.contains(&f)) || all[g - 1].actors().any(|a| used(&all[g - 1], slot_of(a))) {
-                continue;
-            }
-            started += 1;
-            *opponents.entry(all[g - 1].u8(0xFF_0113)).or_insert(0) += 1;
-            let mut e = globals_from(&all[g - 1]);
-            let fail = |f: usize, what: &str, m: String| -> String { format!("{} frame {f} ({what}): {m}", path.display()) };
-            // GenPuyoOrder, then the frames up to the setup.
-            e.vblank();
-            e.deal_bean_orders();
-            if let Some(m) = mismatch(&e, &all[g]) {
-                panic!("{}", fail(g, "bean orders", m));
-            }
-            for f in g + 1..s {
-                e.vblank();
-                if let Some(m) = mismatch(&e, &all[f]) {
-                    panic!("{}", fail(f, "before the setup", m));
+            let (e, f) = match start_from_settings(&all, s, &poked, &mut |e| e.plane_writes.clear()) {
+                Err(m) => panic!("{}: {m}", path.display()),
+                Ok(Start::Skipped) => continue,
+                Ok(Start::Stopped(what)) => {
+                    started += 1;
+                    *stops.entry(what).or_insert(0) += 1;
+                    continue;
                 }
-            }
-            // loc_3C00 and the new actors' first frame.
-            e.vblank();
-            if let Err(Unported(what)) = e.start_match().and_then(|_| e.run_slots(0..SLOTS, &inputs_for(&all[s]))) {
-                *stops.entry(what.to_string()).or_insert(0) += 1;
-                continue;
-            }
-            if let Some(m) = mismatch(&e, &all[s]) {
-                panic!("{}", fail(s, "loc_3C00", m));
-            }
-            // A vertical blank, then the portrait art decompresses with interrupts off.
-            e.vblank();
-            if let Some(m) = mismatch(&e, &all[s + 1]) {
-                panic!("{}", fail(s + 1, "before loc_6070", m));
-            }
-            let mut f = s + 2;
-            // (no vertical blank, no actors: the frame counter and the actor table stand still)
-            let still = |a: &Ram, b: &Ram| a.u16(FRAME_COUNT) == b.u16(FRAME_COUNT) && a.bytes(0xFF_E000, 0x1000) == b.bytes(0xFF_E000, 0x1000);
-            while f < all.len() && still(&all[f], &all[f - 1]) {
-                f += 1;
-            }
-            // loc_6070: the portrait and the stage's actors, then a frame of actors.
-            e.vblank();
-            if let Err(Unported(what)) = e.start_stage().and_then(|_| e.run_slots(0..SLOTS, &inputs_for(&all[f]))) {
-                *stops.entry(what.to_string()).or_insert(0) += 1;
-                continue;
-            }
-            if let Some(m) = mismatch(&e, &all[f]) {
-                panic!("{}", fail(f, "loc_6070", m));
-            }
+                Ok(Start::Running { engine, frame, opponent }) => {
+                    started += 1;
+                    *opponents.entry(opponent).or_insert(0) += 1;
+                    (engine, frame)
+                }
+            };
             let mut drain = |f: usize, e: &mut Engine, ram: &Ram| {
                 e.plane_writes.clear();
                 draws_match(e, ram).map_err(|m| format!("frame {f}: {m}"))
@@ -539,5 +570,99 @@ fn field_planes_match_vdp_snapshots() {
         }
     }
     eprintln!("{compared} snapshots: both fields in plane A identical ({} frames run)", run.frames);
+    assert!(compared > 0);
+}
+
+/// The whole visible screen's planes (40 x 28 cells of A and B) against the VDP
+/// snapshots of `batch/k0_f3`, for matches started from the settings: the screen is
+/// built from the ROM and every plane write the engine makes from the setup on is
+/// applied (the field, the centre panel, the portrait).
+#[test]
+fn screen_planes_match_vdp_snapshots() {
+    use bean_machine::mbm::assets::{planes, screen, Rom, RomAssets, Vram};
+    if !support::install_rom() {
+        return;
+    }
+    let rom = Rom(bean_machine::mbm::rom::get().unwrap());
+    let src = RomAssets::new().unwrap();
+    let Some(path) = recordings().into_iter().find(|p| p.ends_with("batch/k0_f3.ramrec") || p.ends_with("batch\\k0_f3.ramrec")) else {
+        return;
+    };
+    // out/vdp, plus out/vdp_dense: one every 7 frames of the matches set up in the run.
+    let out = path.parent().unwrap().parent().unwrap();
+    let vdp_dir = out.join("vdp");
+    let snaps: std::collections::BTreeMap<usize, Vec<u8>> = [vdp_dir.clone(), out.join("vdp_dense")]
+        .iter()
+        .flat_map(|d| std::fs::read_dir(d).into_iter().flatten().flatten())
+        .filter_map(|e| {
+            let name = e.file_name().into_string().ok()?;
+            let frame = name.strip_prefix("k0_f3_")?.strip_suffix(".vdp")?.parse().ok()?;
+            Some((frame, std::fs::read(e.path()).ok()?))
+        })
+        .collect();
+    if snaps.is_empty() {
+        eprintln!("skipping: no VDP snapshots in {}", vdp_dir.display());
+        return;
+    }
+    let all: Vec<Ram> = frames(&path).collect();
+    let poked = support::poked_frames(&path);
+    let (mut run, mut compared, mut after_top_out) = (Run::default(), 0, 0);
+    for s in match_setups(&all) {
+        let opponent = all[s].u8(0xFF_0113);
+        let mut vram: Vram = screen::match_vram(&rom, &src, opponent).unwrap();
+        planes::match_planes(&rom, &mut vram).unwrap();
+        let vram = std::cell::RefCell::new(vram);
+        let apply = |e: &mut Engine| {
+            for (at, w) in e.plane_writes.drain(..) {
+                vram.borrow_mut().load(at, &w.to_be_bytes());
+            }
+        };
+        let (engine, f) = match start_from_settings(&all, s, &poked, &mut |e| apply(e)) {
+            Err(m) => panic!("{}: {m}", path.display()),
+            Ok(Start::Running { engine, frame, .. }) => (engine, frame),
+            Ok(Start::Stopped(why)) => {
+                eprintln!("match set up at {s}: not started ({why})");
+                continue;
+            }
+            Ok(Start::Skipped) => {
+                eprintln!("match set up at {s}: skipped (not a clean start)");
+                continue;
+            }
+        };
+        let mut ended = false;
+        let mut check = |f: usize, e: &mut Engine, _: &Ram| -> Result<(), String> {
+            apply(e);
+            // From a top-out on, the end sequence draws over the fields (not ported yet).
+            ended |= e.slots.iter().flatten().any(|a| matches!(a, Actor::Player(p) if p.state == PlayerState::TopOut));
+            let Some(snap) = snaps.get(&f) else { return Ok(()) };
+            if ended {
+                after_top_out += 1;
+                return Ok(());
+            }
+            let want = &snap[8 + 0x10000..8 + 0x20000];
+            let vram = vram.borrow();
+            let mut wrong = vec![];
+            for (plane, base) in [("A", 0xC000usize), ("B", 0xE000)] {
+                for row in 0..28 {
+                    for col in 0..40 {
+                        let at = base + row * 0x80 + col * 2;
+                        if vram.0[at..at + 2] != want[at..at + 2] {
+                            wrong.push(format!("{plane} r{row} c{col}: ROM {:02X}{:02X} ours {:02X}{:02X}", want[at], want[at + 1], vram.0[at], vram.0[at + 1]));
+                        }
+                    }
+                }
+            }
+            if !wrong.is_empty() {
+                return Err(format!("frame {f}: {} cells differ: {}", wrong.len(), wrong.iter().take(24).cloned().collect::<Vec<_>>().join(", ")));
+            }
+            compared += 1;
+            Ok(())
+        };
+        match run_from(&all, f, engine, &poked, &mut run, &mut check) {
+            Ok(why) => eprintln!("match from {f}: {why}"),
+            Err(m) => panic!("{}: {m}", path.display()),
+        }
+    }
+    eprintln!("{compared} snapshots: the visible planes identical ({} frames run; {after_top_out} after a top-out not compared)", run.frames);
     assert!(compared > 0);
 }

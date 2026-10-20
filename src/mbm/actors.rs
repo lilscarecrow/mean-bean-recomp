@@ -21,11 +21,13 @@ use super::rng::Rng;
 
 mod draw;
 mod ending;
+mod panel;
 mod setup;
 mod sprite;
 mod stage;
 pub use draw::*;
 pub use ending::*;
+pub use panel::*;
 pub use sprite::*;
 pub use stage::*;
 
@@ -924,6 +926,10 @@ pub struct Engine {
     /// (VRAM address, pattern word) made since the caller last took them.
     pub field_bytes: [FieldBytes; 2],
     pub plane_writes: Vec<(u16, u16)>,
+    /// The centre panel's plane commands queued for the next vertical blank, and the
+    /// portrait map waiting in the Enigma queue.
+    pub panel_commands: Vec<PanelCommand>,
+    pub portrait_map: Option<u32>,
     /// `difficulty` (the option: 0-3) and `byte_FF0114` (stages the time bonus allows for).
     pub difficulty_option: u8,
     pub bonus_level: u8,
@@ -982,6 +988,8 @@ impl Engine {
             pal_fade_gen: [0; 4],
             field_bytes: [FieldBytes::default(), FieldBytes::default()],
             plane_writes: vec![],
+            panel_commands: vec![],
+            portrait_map: None,
             difficulty_option: 0,
             bonus_level: 0,
             bytecode_flag: 0,
@@ -1100,6 +1108,7 @@ impl Engine {
         if std::mem::take(&mut self.password_command) {
             self.run_password_command();
         }
+        self.run_panel_commands();
         self.random();
         // HandleTime
         if (self.player_flags[0] | self.player_flags[1]) & 0x80 == 0 {
@@ -1178,7 +1187,8 @@ impl Engine {
                     p.state = FindPops; // loc_3E96 bookmarks straight away
                 } else if p.flags & flag::SOFT_DROP_POINT != 0 {
                     p.flags &= !flag::SOFT_DROP_POINT;
-                    add_points(&mut p, 1);
+                    add_points(&mut p, 1); // sub_9C4A
+                    self.queue_panel(PanelCommand::Score(p.id));
                 }
             }
             FindPops => {
@@ -1218,6 +1228,7 @@ impl Engine {
             }
             PopScore => {
                 self.score_step(&mut p);
+                self.queue_panel(PanelCommand::Chain(p.id)); // sub_9A40
                 p.state = PopBackup;
             }
             PopBackup => {
@@ -1270,6 +1281,8 @@ impl Engine {
                 if p.flags & FALLING_AFTER_POP != 0 {
                     self.fall_commands.push(slot); // loc_4E14
                 } else {
+                    // loc_3F50: the score again in place of the chain's points.
+                    self.queue_panel(PanelCommand::Score(p.id));
                     self.speed_up(&mut p)?;
                     p.state = ChainNext;
                 }
