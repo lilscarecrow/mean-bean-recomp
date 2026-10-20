@@ -660,6 +660,8 @@ pub struct ShakeField {
 }
 
 pub const SHAKE_FIELD_CODE: u32 = 0x397A;
+/// `vscroll_buffer`'s RAM address (`ShakeField::scroll` is one).
+pub const VSCROLL_BUFFER: u32 = 0xFF_05D2;
 const OPP_FRANKLY: u8 = 1;
 const OPP_DRAGON: u8 = 10;
 
@@ -810,11 +812,20 @@ impl Engine {
             return;
         }
         let Some(slot) = self.free_slot() else { return };
-        self.slots[slot] = Some(Actor::ShakeField(ShakeField { angle: 0, strength: 0x400, scroll: 0xFF_05D2 + 0x34 }));
+        self.slots[slot] = Some(Actor::ShakeField(ShakeField { angle: 0, strength: 0x400, scroll: VSCROLL_BUFFER + 0x34 }));
     }
 
     pub(super) fn run_shake_field(&mut self, mut s: ShakeField) -> Option<ShakeField> {
-        s.angle = s.angle.wrapping_add(0x28); // the scroll offsets aren't ported
+        // Plane A of 6 columns from `scroll` (plane B's words cleared).
+        let first = (s.scroll.wrapping_sub(VSCROLL_BUFFER) / 2) as usize;
+        let mut angle = s.angle;
+        for col in 0..6 {
+            let at = (first + col * 2) % 40;
+            self.vscroll[at] = (sin(angle & 0x7F, s.strength) >> 16) as u16;
+            self.vscroll[(at + 1) % 40] = 0;
+            angle = angle.wrapping_add(0x48);
+        }
+        s.angle = s.angle.wrapping_add(0x28);
         let (left, borrow) = s.strength.overflowing_sub(0x20);
         s.strength = left;
         (!borrow).then_some(s)

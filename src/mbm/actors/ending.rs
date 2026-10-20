@@ -96,7 +96,7 @@ impl BannerState {
     }
 }
 
-/// `loc_72A4` (`sub_7292`): draws the win banner over 10 frames, then holds it.
+/// `loc_72A4` (`sub_7292`): draws the win banner over 10 frames, then "YOU WIN".
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Banner {
     pub state: BannerState,
@@ -279,6 +279,11 @@ impl Engine {
                 }
             }
             Cleared => {
+                // The field's columns stop scrolling (plane A and B words).
+                let first = usize::from(FIELD_ORIGIN[p.id as usize & 1] & 0x7F) / 2;
+                for i in 0..12 {
+                    self.vscroll[(first + i) % 40] = 0;
+                }
                 // loc_7D78
                 if p.id == 0 {
                     // loc_7EC2
@@ -298,7 +303,8 @@ impl Engine {
                 }
             }
             ResultsShown => {
-                p.delay = 0x20; // sub_7CD2 draws the time
+                self.queue_panel(PanelCommand::Time(p.beans_total)); // sub_7CD2
+                p.delay = 0x20;
                 p.state = BonusWait;
             }
             BonusWait => {
@@ -308,9 +314,11 @@ impl Engine {
             }
             Bonus => {
                 if p.base == 0 {
+                    self.queue_panel(PanelCommand::Text { entry: NO_BONUS_TEXT, blink: 0, player: 0 });
                     p.delay = 0x40;
                     p.state = NoBonusWait;
                 } else {
+                    self.queue_panel(PanelCommand::Bonus(p.base));
                     p.w28 = (p.base >> 7).max(1);
                     p.w26 = 0x80;
                     p.delay = 0x3C;
@@ -329,6 +337,7 @@ impl Engine {
                 if skip || p.w26 == 0 {
                     add_points(p, u32::from(p.base));
                     self.queue_panel(PanelCommand::Score(p.id));
+                    self.queue_panel(PanelCommand::Bonus(0)); // $99000000
                     self.show_password()?;
                     p.state = Continue; // the bookmark at $7E9E (no delay left)
                 } else if p.w26 < 0x780 && p.base != 0 {
@@ -337,6 +346,7 @@ impl Engine {
                     p.base -= step;
                     add_points(p, u32::from(step));
                     self.queue_panel(PanelCommand::Score(p.id));
+                    self.queue_panel(PanelCommand::Bonus(p.base));
                 }
             }
             NoBonusWait => {
@@ -444,12 +454,16 @@ impl Engine {
 
     pub(super) fn run_name_entry(&mut self, mut n: NameEntry, inputs: &Inputs) -> Option<NameEntry> {
         match n.state {
-            NameEntryState::Start => n.state = NameEntryState::Clear, // draws the prompt
+            NameEntryState::Start => {
+                self.name_prompt(n.player_id, n.rank as u8);
+                n.state = NameEntryState::Clear;
+            }
             NameEntryState::Clear => {
                 n.letters = [1; 5]; // "A"
                 n.state = NameEntryState::Edit;
             }
             NameEntryState::Edit => {
+                self.name_letters(n.player_id, &n.letters, n.cursor, n.blink, false);
                 n.blink = n.blink.wrapping_add(1);
                 let pad = inputs.pads[usize::from(n.player_id & 1)];
                 let at = usize::from(n.cursor).min(4);
@@ -473,6 +487,8 @@ impl Engine {
             }
             NameEntryState::Shown => {
                 if wait(&mut n.delay) {
+                    // sub_C168 with +$25 (the delay's low byte, 0 now): the letters shown.
+                    self.name_letters(n.player_id, &n.letters, n.cursor, n.blink, false);
                     n.state = NameEntryState::Done;
                 }
             }
@@ -599,6 +615,7 @@ impl Engine {
     /// `SpecPlane9E` (in the vertical blank): the password for the next stage and its
     /// four beans.
     pub(super) fn run_password_command(&mut self) {
+        self.result_line(4);
         let level = u32::from(self.level.saturating_sub(3));
         let difficulty = u32::from((self.difficulty_option as i8).wrapping_neg().wrapping_sub(1) as u8 & 3);
         let mut code = rom::word(PASSWORDS + level * 8 + difficulty * 2);
@@ -687,12 +704,14 @@ impl Engine {
                 b.state = BannerState::Count;
             }
             BannerState::Count => {
+                self.queue_panel(PanelCommand::Banner(b.timer as u8));
                 b.timer = b.timer.wrapping_sub(1);
                 if b.timer == 0 {
                     b.state = BannerState::Hold;
                 }
             }
-            BannerState::Hold => {}
+            // loc_72CA: queued every frame (the text blinks with the frame counter).
+            BannerState::Hold => self.queue_panel(PanelCommand::Text { entry: WIN_TEXT, blink: 0x0F, player: 0 }),
         }
         Some(b)
     }
@@ -703,7 +722,12 @@ impl Engine {
             return None;
         }
         if w.anim.frame != w.shown {
-            w.shown = w.anim.frame; // QueuePlaneCmd $84: drawing isn't ported
+            w.shown = w.anim.frame;
+            let player = match &self.slots[w.parent] {
+                Some(Actor::Player(p)) => p.id,
+                _ => 0,
+            };
+            self.queue_panel(PanelCommand::Wipe { player, frame: w.shown });
         }
         Some(w)
     }
@@ -731,6 +755,8 @@ impl Engine {
             return Ok(None);
         }
         c.motion.step(c.draw);
+        // The column of plane A scrolls down with it.
+        self.vscroll[usize::from(c.scroll / 2) % 40] = ((c.motion.y >> 16) as u16).wrapping_neg();
         Ok(Some(c))
     }
 

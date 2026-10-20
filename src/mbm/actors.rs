@@ -17,6 +17,7 @@ use super::bean_order::BeanColor;
 use super::field::{Field, Group, COLS, DIR, HIDDEN_ROWS, ROWS};
 use super::motion::{cos, sin, Motion};
 use super::pair::{PadInput, Pair, RotateKeys, Step};
+use super::assets::planes::FIELD_ORIGIN;
 use super::rng::Rng;
 
 mod draw;
@@ -929,6 +930,9 @@ pub struct Engine {
     /// The centre panel's plane commands queued for the next vertical blank, and the
     /// portrait map waiting in the Enigma queue.
     pub panel_commands: Vec<PanelCommand>,
+    /// `vscroll_buffer`: per 2-cell column, plane A's and plane B's vertical scroll
+    /// (the vertical blank copies it to VSRAM).
+    pub vscroll: [u16; 40],
     pub portrait_map: Option<u32>,
     /// `difficulty` (the option: 0-3) and `byte_FF0114` (stages the time bonus allows for).
     pub difficulty_option: u8,
@@ -989,6 +993,7 @@ impl Engine {
             field_bytes: [FieldBytes::default(), FieldBytes::default()],
             plane_writes: vec![],
             panel_commands: vec![],
+            vscroll: [0; 40],
             portrait_map: None,
             difficulty_option: 0,
             bonus_level: 0,
@@ -1658,6 +1663,15 @@ impl Engine {
             d.seen = d.falling;
             d.shake = d.strength;
             d.voiced = true;
+        }
+        // The field's 6 columns of plane A wobble (from +$2C: GetPuyoField's plane address).
+        if let Some(Actor::Player(p)) = self.slots[d.player_slot].as_ref() {
+            let first = usize::from(FIELD_ORIGIN[usize::from(p.id & 1)] & 0x7F) / 2;
+            let mut angle = d.phase;
+            for col in 0..6 {
+                self.vscroll[(first + col * 2) % 40] = (sin(angle & 0x7F, d.shake) >> 16) as u16;
+                angle = angle.wrapping_add(0x20);
+            }
         }
         d.phase = d.phase.wrapping_add(0x18);
         if d.shake != 0 {

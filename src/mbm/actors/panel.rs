@@ -24,6 +24,16 @@ pub enum PanelCommand {
     StageText,
     /// $9A: "1P" and "DR R" over the fields.
     Names,
+    /// $84 (`loc_833E`): a frame (0-4) of the loser's field crumbling away: plane B's
+    /// ground under the field, and (frame 0) plane A cleared above and below it.
+    Wipe { player: u8, frame: u8 },
+    /// $9B (`loc_72A4`): the win banner over P1's field opening from the middle; the
+    /// countdown (10 to 1) places its top and bottom edges.
+    Banner(u8),
+    /// $98 (`sub_7CD2`): the results' time line, with the seconds.
+    Time(u16),
+    /// $99: the results' bonus line, with the points left to add.
+    Bonus(u16),
 }
 
 /// `StageTextStrings`: per entry, a count of strings - 1, then per string the plane
@@ -51,6 +61,30 @@ const SPECIAL_TILES: [u8; 2] = [0, 0x4A];
 const PORTRAIT_AT: u16 = 0xC61E;
 const PORTRAIT_BASE: u16 = 0xE400;
 const PORTRAIT_SIZE: (usize, usize) = (10, 7);
+/// `sub_72CA`'s entry once the banner is open: "YOU WIN" (blinking).
+pub const WIN_TEXT: u8 = 0x0C;
+/// `byte_1B0DA`: the crumbling ground by level (3 = the lessons' board), and
+/// `off_1B0EA`: per board and side, a descriptor: map, bytes per frame, fill word, map
+/// base, width - 1, plane B address, plane A below and above the field.
+const WIPE_BOARD: u32 = 0x1B0DA;
+const WIPE_DESCRIPTORS: u32 = 0x1B0EA;
+/// `word_1A12E`: the banner's top edge (12 words) over its fill; `word_1A146`: fill
+/// over the bottom edge.
+const BANNER_TOP: u32 = 0x1A12E;
+const BANNER_BOTTOM: u32 = 0x1A146;
+const BANNER_AT: u16 = 0xC204;
+/// `sub_7D78`'s entry when there's no time bonus.
+pub const NO_BONUS_TEXT: u8 = 5;
+/// The results' lines over P1's field (`DrawPlayerText`, 10 characters, base $A500):
+/// `byte_1A20C`/`byte_1A216` (time), `unk_1A25C`/`unk_1A266` (bonus), `unk_1A38E`
+/// (over the password); and where their numbers go (5 digits, base $8500).
+const RESULT_LINES: [(u16, u32); 5] = [(0xC506, 0x1A20C), (0xC606, 0x1A216), (0xC706, 0x1A25C), (0xC806, 0x1A266), (0xC906, 0x1A38E)];
+const TIME_AT: u16 = 0xC608;
+/// `unk_C156` ("RANK") and `unk_C15C` ("YOUR NAME"): name entry characters to a
+/// negative byte.
+const NAME_RANK_TEXT: u32 = 0xC156;
+const NAME_PROMPT_TEXT: u32 = 0xC15C;
+const BONUS_AT: u16 = 0xC808;
 
 impl Engine {
     /// `QueuePlaneCmd` for the panel.
@@ -75,6 +109,25 @@ impl Engine {
                 PanelCommand::Names => {
                     self.small_text(0xC21E, 0xA500, STR_1P, 4);
                     self.small_text(0xC22A, 0xA500, STR_DR_R, 4);
+                }
+                PanelCommand::Wipe { player, frame } => self.draw_wipe(player, frame),
+                PanelCommand::Time(secs) => {
+                    self.result_line(0);
+                    self.result_line(1);
+                    self.result_number(TIME_AT, secs);
+                }
+                PanelCommand::Bonus(points) => {
+                    self.result_line(2);
+                    self.result_line(3);
+                    self.result_number(BONUS_AT, points);
+                }
+                PanelCommand::Banner(t) => {
+                    // SpecPlane9B: 2 rows from the top edge down, then 2 rows from the
+                    // fill down to the bottom edge.
+                    let top = BANNER_AT.wrapping_add(u16::from(t.wrapping_sub(1)) << 7);
+                    self.copy_words(top, BANNER_TOP, 12, 2);
+                    let bottom = BANNER_AT.wrapping_add(u16::from(0x12u8.wrapping_sub(t)) << 7);
+                    self.copy_words(bottom, BANNER_BOTTOM, 12, 2);
                 }
             }
         }
@@ -166,6 +219,144 @@ impl Engine {
             for (col, &t) in tiles.iter().enumerate() {
                 self.plane_writes.push((0xE520 + row as u16 * ROW_BYTES + col as u16 * 2, 0xC000 | u16::from(t)));
             }
+        }
+    }
+
+    /// A line of the results (`DrawPlayerText`; the controls aren't swapped).
+    pub(super) fn result_line(&mut self, line: usize) {
+        let (at, text) = RESULT_LINES[line];
+        self.small_text(at, 0xA500, text, 10);
+    }
+
+    /// `loc_1A3BA`: a number right-aligned in 5 characters ("0" for none).
+    fn result_number(&mut self, at: u16, v: u16) {
+        let mut buffer = [0u8, 0, 0, 0, 2];
+        let (mut v, mut i) = (v, 5);
+        while v != 0 {
+            i -= 1;
+            buffer[i] = ((v % 10) as u8 + 1) << 1;
+            v /= 10;
+        }
+        for (k, &b) in buffer.iter().enumerate() {
+            self.tile_pair(at + k as u16 * 2, 0x8500, b);
+        }
+    }
+
+    /// `sub_C1E8`: a name entry character (0 blank, 1-26 letters, more for the rest)
+    /// as a tile pair; the end mark ($B6) blinks with the frame counter.
+    fn name_char(&mut self, at: u16, ch: u8) {
+        let mut c = ch;
+        if c != 0 {
+            c = c.wrapping_add(0x3F);
+            if c >= 0x5F {
+                c = c.wrapping_sub(0x29);
+            }
+        }
+        let b = c << 1;
+        let (top, bottom) = if b == 0xB6 {
+            (0xC500, 0xC5B6 | ((self.frame_count >> 3) & 1))
+        } else {
+            (0xC500 | u16::from(b), 0xC500 | u16::from(b.wrapping_add(1)))
+        };
+        self.plane_writes.push((at, top));
+        self.plane_writes.push((at.wrapping_add(ROW_BYTES), bottom));
+    }
+
+    /// `loc_C00A`: "RANK n" and "YOUR NAME" over the player's field.
+    pub(super) fn name_prompt(&mut self, player: u8, rank: u8) {
+        let origin = FIELD_ORIGIN[usize::from(player & 1)];
+        let mut at = origin + 0x606;
+        for i in 0.. {
+            let ch = rom::byte(NAME_RANK_TEXT + i);
+            if ch & 0x80 != 0 {
+                break;
+            }
+            self.name_char(at, ch);
+            at += 2;
+        }
+        self.name_char(at, rank.wrapping_add(0x21));
+        let mut at = origin + 0x702;
+        for i in 0.. {
+            let ch = rom::byte(NAME_PROMPT_TEXT + i);
+            if ch & 0x80 != 0 {
+                break;
+            }
+            self.name_char(at, ch);
+            at += 2;
+        }
+    }
+
+    /// `sub_C168`: the 3 letters: those before the cursor, the cursor's (hidden while
+    /// `blink` bit 3 is set), then the "unset" mark; all blank with `hide`.
+    pub(super) fn name_letters(&mut self, player: u8, letters: &[u8], cursor: u16, blink: u8, hide: bool) {
+        let at = FIELD_ORIGIN[usize::from(player & 1)] + 0x888;
+        for (i, &l) in letters.iter().take(3).enumerate() {
+            let i = i as u16;
+            let mut ch = match i.cmp(&cursor) {
+                std::cmp::Ordering::Less => l,
+                std::cmp::Ordering::Equal => if blink & 8 != 0 { 0 } else { l },
+                std::cmp::Ordering::Greater => 0x1C,
+            };
+            if hide {
+                ch = 0;
+            }
+            self.name_char(at + i * 2, ch);
+        }
+    }
+
+    /// `CopyTilemap`: `rows` rows of `width` words from the ROM.
+    fn copy_words(&mut self, at: u16, from: u32, width: u16, rows: u16) {
+        for i in 0..width * rows {
+            let to = at.wrapping_add((i / width) * ROW_BYTES).wrapping_add((i % width) * 2);
+            self.plane_writes.push((to, rom::word(from + u32::from(i) * 2)));
+        }
+    }
+
+    /// `CopyTilemap8`: `rows` rows of `width` bytes from the ROM, each the low byte of a
+    /// word on `base`.
+    fn copy_bytes(&mut self, at: u16, from: u32, base: u16, width: u16, rows: u16) {
+        for i in 0..width * rows {
+            let to = at.wrapping_add((i / width) * ROW_BYTES).wrapping_add((i % width) * 2);
+            self.plane_writes.push((to, (base & 0xFF00) | u16::from(rom::byte(from + u32::from(i)))));
+        }
+    }
+
+    /// `FillPlane`.
+    fn fill(&mut self, at: u16, word: u16, width: u16, rows: u16) {
+        for i in 0..width * rows {
+            self.plane_writes.push((at.wrapping_add((i / width) * ROW_BYTES).wrapping_add((i % width) * 2), word));
+        }
+    }
+
+    /// `SpecPlane84`.
+    fn draw_wipe(&mut self, player: u8, frame: u8) {
+        let board = match self.level_mode & 3 {
+            0 | 1 => rom::byte(WIPE_BOARD + u32::from(self.level)),
+            _ => 3,
+        };
+        let d = rom::long(WIPE_DESCRIPTORS + (u32::from(board) << 1 | u32::from(player & 1)) * 4);
+        let (map, stride, fill) = (rom::long(d), rom::word(d + 4), rom::word(d + 6));
+        let (base, width) = (rom::word(d + 8), rom::word(d + 0x0A) + 1);
+        let (ground, below, above) = (rom::word(d + 0x0C), rom::word(d + 0x0E), rom::word(d + 0x10));
+        // loc_1B0A0: maps of $40 bytes a frame or more are words.
+        let copy = |e: &mut Engine, at: u16, from: u32, base: u16, width: u16| {
+            if stride < 0x40 {
+                e.copy_bytes(at, from, base, width, 2);
+            } else {
+                e.copy_words(at, from, width, 2);
+            }
+        };
+        copy(self, ground, map + u32::from(frame) * u32::from(stride), base, width);
+        match frame {
+            0 => {
+                self.fill(above, fill, 12, 2);
+                self.fill(below, fill, 12, 0x26);
+            }
+            5 => {
+                copy(self, above, map + u32::from(stride) * 6, fill, 12);
+                copy(self, ground, map, fill, width);
+            }
+            _ => {}
         }
     }
 

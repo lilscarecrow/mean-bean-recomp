@@ -159,7 +159,7 @@ impl Game {
     /// The picture as RGBA (320 x 224).
     pub fn picture(&self) -> Vec<u8> {
         let cram: [u16; 64] = std::array::from_fn(|i| self.palettes[i / 16][i % 16]);
-        let pixels = render::render(&Layout::match_screen(), &self.vram.0, &cram, &[0; 40]);
+        let pixels = render::render(&Layout::match_screen(), &self.vram.0, &cram, &self.engine.vscroll);
         let mut out = Vec::with_capacity(pixels.len() * 4);
         for p in pixels {
             let [r, g, b] = render::to_rgb(p);

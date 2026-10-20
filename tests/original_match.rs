@@ -47,6 +47,9 @@ fn engine_from(ram: &Ram) -> Result<Engine, String> {
 
 /// Everything but the actors: what the game flow leaves for a match (settings, the
 /// score so far, tables kept between matches, the random seed, the clocks).
+/// `vscroll_buffer`.
+const VSCROLL: u32 = 0xFF_05D2;
+
 fn globals_from(ram: &Ram) -> Engine {
     let mut e = Engine::new();
     for i in 0..2 {
@@ -64,6 +67,7 @@ fn globals_from(ram: &Ram) -> Engine {
         e.popping[i] = ram.u8(0xFF_19AA + i as u32) != 0;
     }
     e.level_mode = ram.u8(0xFF_1964);
+    e.vscroll = std::array::from_fn(|i| ram.u16(VSCROLL + i as u32 * 2));
     e.difficulty = ram.u8(0xFF_0104);
     e.opponent = ram.u8(0xFF_0113);
     e.level = ram.u8(0xFF_0112);
@@ -135,6 +139,12 @@ fn mismatch_except(e: &Engine, ram: &Ram, skip: Option<usize>) -> Option<String>
                 }
             }
         }
+    }
+    let vscroll: [u16; 40] = std::array::from_fn(|i| ram.u16(VSCROLL + i as u32 * 2));
+    if vscroll != e.vscroll {
+        return Some(format!("vscroll_buffer
+  ROM {vscroll:04X?}
+  our {:04X?}", e.vscroll));
     }
     for i in 0..2 {
         let words = ram.field_words(i);
@@ -573,44 +583,57 @@ fn field_planes_match_vdp_snapshots() {
     assert!(compared > 0);
 }
 
-/// The whole visible screen's planes (40 x 28 cells of A and B) against the VDP
-/// snapshots of `batch/k0_f3`, for matches started from the settings: the screen is
-/// built from the ROM and every plane write the engine makes from the setup on is
-/// applied (the field, the centre panel, the portrait).
+/// The whole visible screen's planes (40 x 28 cells of A and B) against VDP snapshots
+/// taken while replaying recorded bot runs (`out/vdp/<run>_NNNNNN.vdp`, and
+/// `out/vdp_dense`, one every 7 frames), for the matches started from the settings: the
+/// screen is built from the ROM and every plane write the engine makes from the setup
+/// on is applied (fields, centre panel, portrait, the end sequence and results).
 #[test]
 fn screen_planes_match_vdp_snapshots() {
-    use bean_machine::mbm::assets::{planes, screen, Rom, RomAssets, Vram};
+    use bean_machine::mbm::assets::{Rom, RomAssets};
     if !support::install_rom() {
         return;
     }
     let rom = Rom(bean_machine::mbm::rom::get().unwrap());
     let src = RomAssets::new().unwrap();
-    let Some(path) = recordings().into_iter().find(|p| p.ends_with("batch/k0_f3.ramrec") || p.ends_with("batch\\k0_f3.ramrec")) else {
-        return;
-    };
-    // out/vdp, plus out/vdp_dense: one every 7 frames of the matches set up in the run.
-    let out = path.parent().unwrap().parent().unwrap();
-    let vdp_dir = out.join("vdp");
-    let snaps: std::collections::BTreeMap<usize, Vec<u8>> = [vdp_dir.clone(), out.join("vdp_dense")]
-        .iter()
-        .flat_map(|d| std::fs::read_dir(d).into_iter().flatten().flatten())
-        .filter_map(|e| {
-            let name = e.file_name().into_string().ok()?;
-            let frame = name.strip_prefix("k0_f3_")?.strip_suffix(".vdp")?.parse().ok()?;
-            Some((frame, std::fs::read(e.path()).ok()?))
-        })
-        .collect();
-    if snaps.is_empty() {
-        eprintln!("skipping: no VDP snapshots in {}", vdp_dir.display());
-        return;
+    let (mut run, mut compared) = (Run::default(), 0);
+    for path in recordings() {
+        let stem = path.file_stem().unwrap().to_string_lossy().to_string();
+        let out = path.parent().unwrap().parent().unwrap();
+        let prefix = format!("{stem}_");
+        let snaps: std::collections::BTreeMap<usize, Vec<u8>> = [out.join("vdp"), out.join("vdp_dense")]
+            .iter()
+            .flat_map(|d| std::fs::read_dir(d).into_iter().flatten().flatten())
+            .filter_map(|e| {
+                let name = e.file_name().into_string().ok()?;
+                let frame = name.strip_prefix(&prefix)?.strip_suffix(".vdp")?.parse().ok()?;
+                Some((frame, std::fs::read(e.path()).ok()?))
+            })
+            .collect();
+        if snaps.is_empty() {
+            continue;
+        }
+        compared += screen_against(&rom, &src, &path, &snaps, &mut run);
     }
-    let all: Vec<Ram> = frames(&path).collect();
-    let poked = support::poked_frames(&path);
-    let (mut run, mut compared, mut after_top_out) = (Run::default(), 0, 0);
+    eprintln!("{compared} snapshots: the visible planes identical ({} frames run)", run.frames);
+    assert!(compared > 0, "no VDP snapshots to compare");
+}
+
+fn screen_against(
+    rom: &bean_machine::mbm::assets::Rom,
+    src: &bean_machine::mbm::assets::RomAssets,
+    path: &std::path::PathBuf,
+    snaps: &std::collections::BTreeMap<usize, Vec<u8>>,
+    run: &mut Run,
+) -> usize {
+    use bean_machine::mbm::assets::{planes, screen, Vram};
+    let mut compared = 0;
+    let all: Vec<Ram> = frames(path).collect();
+    let poked = support::poked_frames(path);
     for s in match_setups(&all) {
         let opponent = all[s].u8(0xFF_0113);
-        let mut vram: Vram = screen::match_vram(&rom, &src, opponent).unwrap();
-        planes::match_planes(&rom, &mut vram).unwrap();
+        let mut vram: Vram = screen::match_vram(rom, src, opponent).unwrap();
+        planes::match_planes(rom, &mut vram).unwrap();
         let vram = std::cell::RefCell::new(vram);
         let apply = |e: &mut Engine| {
             for (at, w) in e.plane_writes.drain(..) {
@@ -629,16 +652,9 @@ fn screen_planes_match_vdp_snapshots() {
                 continue;
             }
         };
-        let mut ended = false;
         let mut check = |f: usize, e: &mut Engine, _: &Ram| -> Result<(), String> {
             apply(e);
-            // From a top-out on, the end sequence draws over the fields (not ported yet).
-            ended |= e.slots.iter().flatten().any(|a| matches!(a, Actor::Player(p) if p.state == PlayerState::TopOut));
             let Some(snap) = snaps.get(&f) else { return Ok(()) };
-            if ended {
-                after_top_out += 1;
-                return Ok(());
-            }
             let want = &snap[8 + 0x10000..8 + 0x20000];
             let vram = vram.borrow();
             let mut wrong = vec![];
@@ -658,11 +674,10 @@ fn screen_planes_match_vdp_snapshots() {
             compared += 1;
             Ok(())
         };
-        match run_from(&all, f, engine, &poked, &mut run, &mut check) {
+        match run_from(&all, f, engine, &poked, run, &mut check) {
             Ok(why) => eprintln!("match from {f}: {why}"),
             Err(m) => panic!("{}: {m}", path.display()),
         }
     }
-    eprintln!("{compared} snapshots: the visible planes identical ({} frames run; {after_top_out} after a top-out not compared)", run.frames);
-    assert!(compared > 0);
+    compared
 }
