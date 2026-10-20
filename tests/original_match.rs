@@ -332,6 +332,18 @@ fn run_from(
             Err(Unported(what)) => return Ok(format!("frame {f}: {what}")),
             Ok(()) => {}
         }
+        if mismatch(&engine, cur).is_some() {
+            // A lag frame whose vertical blank wrote into an actor (a plane command
+            // clearing a player's flag), so the actor area did change.
+            let mut t = before.clone();
+            t.vblank();
+            if mismatch(&t, cur).is_none() {
+                engine = t;
+                run.lag += 1;
+                on_frame(f, &mut engine, cur)?;
+                continue;
+            }
+        }
         if let Some(m) = mismatch(&engine, cur) {
             // The logic may have overrun the video frame: find where RunActors was cut
             // (between actors, or in the middle of actor `cut`, which then shows half done).

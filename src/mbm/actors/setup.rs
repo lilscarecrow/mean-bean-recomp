@@ -241,7 +241,19 @@ impl Engine {
                     self.slots[slot] = Some(Actor::BgRunner(runner));
                 }
             }
-            OPP_COCONUTS | OPP_SIR_FFUZZY => return Err(Unported("this opponent's stage actors (sub_678E)")),
+            OPP_COCONUTS => {
+                if let Some(slot) = self.find_actor_slot() {
+                    self.slots[slot] = Some(Actor::CoconutsLight(CoconutsLight { started: false, level: 0, counter: 0, wait: 0 }));
+                }
+            }
+            OPP_SIR_FFUZZY => {
+                if let Some(slot) = self.find_actor_slot() {
+                    self.slots[slot] = Some(Actor::FfuzzyEyes(FfuzzyEyes { draw: 0, frame: 0, wait: 0x32, counter: 0 }));
+                    if let Some(slot) = self.find_actor_slot() {
+                        self.slots[slot] = Some(Actor::FfuzzyPalette(FfuzzyPalette { started: false, wait: 0x11, counter: 0 }));
+                    }
+                }
+            }
             _ => {}
         }
         Ok(())

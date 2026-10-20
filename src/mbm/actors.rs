@@ -107,6 +107,9 @@ pub enum Actor {
     DangerSpark(DangerSpark),
     Portrait(Portrait),
     PortraitPalette(PortraitPalette),
+    CoconutsLight(CoconutsLight),
+    FfuzzyEyes(FfuzzyEyes),
+    FfuzzyPalette(FfuzzyPalette),
     PaletteFade(PaletteFade),
     Star(Star),
     StarSpark(StarSpark),
@@ -168,6 +171,9 @@ impl Actor {
             Actor::DangerSpark(s) => Some(s.state.code()),
             Actor::Portrait(p) => Some(if p.started { PORTRAIT_CODE } else { 0x60F4 }),
             Actor::PortraitPalette(p) => Some(if p.started { PORTRAIT_PALETTE_CODE } else { 0x6F38 }),
+            Actor::CoconutsLight(c) => Some(if c.started { COCONUTS_LIGHT_CODE } else { 0x6954 }),
+            Actor::FfuzzyEyes(_) => Some(FFUZZY_EYES_CODE),
+            Actor::FfuzzyPalette(p) => Some(if p.started { FFUZZY_PALETTE_CODE } else { 0x6E46 }),
             Actor::PaletteFade(_) => Some(PALETTE_FADE_CODE),
             Actor::Star(s) => Some(s.state.code()),
             Actor::StarSpark(_) => Some(STAR_SPARK_CODE),
@@ -705,6 +711,8 @@ const ICON_NUDGE: [i16; 5] = [4, -8, -20, -32, -44];
 #[derive(Clone, Debug, PartialEq)]
 pub struct GarbageDrop {
     pub player_slot: usize,
+    /// +$2A: the player's id (its field's columns wobble).
+    pub player: u8,
     /// False before its first run ($48A2), true in the update loop ($48BA).
     pub started: bool,
     /// Columns still falling (+$26) and the count last seen (+$28).
@@ -1172,6 +1180,9 @@ impl Engine {
                 Actor::DangerSpark(sp) => self.run_danger_spark(sp).map(Actor::DangerSpark),
                 Actor::Portrait(pt) => self.run_portrait(pt).map(Actor::Portrait),
                 Actor::PortraitPalette(pt) => self.run_portrait_palette(pt).map(Actor::PortraitPalette),
+                Actor::CoconutsLight(c) => self.run_coconuts_light(c).map(Actor::CoconutsLight),
+                Actor::FfuzzyEyes(e) => self.run_ffuzzy_eyes(e).map(Actor::FfuzzyEyes),
+                Actor::FfuzzyPalette(p) => self.run_ffuzzy_palette(p).map(Actor::FfuzzyPalette),
                 Actor::PaletteFade(pf) => self.run_palette_fade(pf).map(Actor::PaletteFade),
                 Actor::Star(st) => self.run_star(st).map(Actor::Star),
                 Actor::StarSpark(sp) => self.run_star_spark(sp).map(Actor::StarSpark),
@@ -1236,6 +1247,7 @@ impl Engine {
                     let backup_bytes = self.field_bytes[p.id as usize & 1].cells;
                     p.pop = Some(PopWork { groups, cells, backup: field.clone(), backup_bytes, falling: vec![] });
                     self.chaining[p.id as usize & 1] = true;
+                    self.cpu_memory[p.id as usize & 1][1] = 0; // sub_11ECE
                     p.state = PopScore;
                 } else {
                     p.delay = SETTLE_DELAY[p.speed_level.min(4) as usize];
@@ -1629,6 +1641,7 @@ impl Engine {
         let Some(drop_slot) = self.find_actor_slot() else { return };
         self.slots[drop_slot] = Some(Actor::GarbageDrop(GarbageDrop {
             player_slot,
+            player: p.id,
             started: false,
             falling: 0,
             seen: 0,
@@ -1650,6 +1663,11 @@ impl Engine {
             if let Some(Actor::GarbageDrop(d)) = self.slots[drop_slot].as_mut() {
                 d.falling += 1;
                 d.strength = d.strength.wrapping_add(0x100);
+            }
+            // sub_11E90: garbage landing in the columns the CPU was aiming at.
+            let mem = &mut self.cpu_memory[id];
+            if (mem[8]..=mem[9]).contains(&((col as u8) << 1)) {
+                mem[1] = 0; // sub_11ECE
             }
             self.slots[slot] = Some(Actor::GarbageColumn(GarbageColumn {
                 player: p.id,
@@ -1676,13 +1694,11 @@ impl Engine {
             d.voiced = true;
         }
         // The field's 6 columns of plane A wobble (from +$2C: GetPuyoField's plane address).
-        if let Some(Actor::Player(p)) = self.slots[d.player_slot].as_ref() {
-            let first = usize::from(FIELD_ORIGIN[usize::from(p.id & 1)] & 0x7F) / 2;
-            let mut angle = d.phase;
-            for col in 0..6 {
-                self.vscroll[(first + col * 2) % 40] = (sin(angle & 0x7F, d.shake) >> 16) as u16;
-                angle = angle.wrapping_add(0x20);
-            }
+        let first = usize::from(FIELD_ORIGIN[usize::from(d.player & 1)] & 0x7F) / 2;
+        let mut angle = d.phase;
+        for col in 0..6 {
+            self.vscroll[(first + col * 2) % 40] = (sin(angle & 0x7F, d.shake) >> 16) as u16;
+            angle = angle.wrapping_add(0x20);
         }
         d.phase = d.phase.wrapping_add(0x18);
         if d.shake != 0 {

@@ -66,6 +66,7 @@ impl Engine {
             Actor::BgSlide(b) => d(b.draw, 0x2C, b.frame, b.x, b.y),
             Actor::BgRunner(r) => d(r.draw, 0x2D, r.anim.frame, r.x, r.y),
             Actor::BgSpark(s) => d(0x80, 0x2D, s.frame, s.x, s.y),
+            Actor::FfuzzyEyes(e) => d(e.draw, FFUZZY_EYES_MAPPINGS, e.frame, FFUZZY_EYES_AT.0, FFUZZY_EYES_AT.1),
             // Not sprites: controllers, timers, palette and plane work.
             _ => d(0, 0, 0, 0, 0),
         }

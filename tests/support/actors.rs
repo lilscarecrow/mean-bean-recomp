@@ -74,6 +74,7 @@ pub fn load(ram: &Ram, slot: usize, tag: u8) -> Option<Actor> {
     if code == 0x48A2 || code == 0x48BA {
         return Some(Actor::GarbageDrop(GarbageDrop {
             player_slot: slot_of(ram.u32(a + 0x2E)),
+            player: ram.u8(a + 0x2A),
             started: code == 0x48BA,
             falling: ram.u16(a + 0x26),
             seen: ram.u16(a + 0x28),
@@ -493,6 +494,16 @@ fn load_stage(ram: &Ram, a: u32, code: u32) -> Option<Actor> {
             step: ram.u16(a + 0x26),
             level: ram.u8(a + 0x2A),
         }),
+        COCONUTS_LIGHT_CODE | 0x6954 => Actor::CoconutsLight(CoconutsLight {
+            started: code == COCONUTS_LIGHT_CODE,
+            level: ram.u8(a + 0x2A),
+            counter: ram.u16(a + 0x26),
+            wait: ram.u8(a + 0x22),
+        }),
+        FFUZZY_EYES_CODE => Actor::FfuzzyEyes(FfuzzyEyes { draw: ram.u8(a + 6), frame: ram.u8(a + 9), wait: ram.u8(a + 0x22), counter: ram.u16(a + 0x26) }),
+        FFUZZY_PALETTE_CODE | 0x6E46 => {
+            Actor::FfuzzyPalette(FfuzzyPalette { started: code == FFUZZY_PALETTE_CODE, wait: ram.u8(a + 0x22), counter: ram.u16(a + 0x26) })
+        }
         _ => return None,
     })
 }
@@ -617,6 +628,9 @@ pub fn describe(actor: &Actor) -> String {
         Actor::ShakeField(sh) => format!("shake field angle {:02X} strength {:X} scroll {:X}", sh.angle, sh.strength, sh.scroll),
         Actor::PasswordBean(b) => format!("password bean color {:02X} at {:X},{:X} anim {:?}", b.color, b.x, b.y, b.anim),
         Actor::PortraitPalette(pt) => format!("portrait palette wait {} step {:04X} level {}", pt.wait, pt.step, pt.level),
+        Actor::CoconutsLight(c) => format!("coconuts light {} level {} step {:04X} wait {}", c.started, c.level, c.counter, c.wait),
+        Actor::FfuzzyEyes(e) => format!("ffuzzy eyes draw {:02X} frame {} wait {} count {:04X}", e.draw, e.frame, e.wait, e.counter),
+        Actor::FfuzzyPalette(p) => format!("ffuzzy palette {} wait {} step {:04X}", p.started, p.wait, p.counter),
         Actor::Glow(g) => format!(
             "glow {:05X} chain {} pos {:08X},{:08X} vel {:08X},{:08X} base {:X} counter {:04X} draw {:02X} delay {} anim {:?}",
             g.state.code(), g.chain, g.motion.x, g.motion.y, g.motion.vx, g.motion.vy, g.base_x, g.counter, g.draw, g.delay, g.anim

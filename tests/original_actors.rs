@@ -66,6 +66,9 @@ fn is_match_level(a: &Actor) -> bool {
             | Actor::DangerSpark(_)
             | Actor::Portrait(_)
             | Actor::PortraitPalette(_)
+            | Actor::CoconutsLight(_)
+            | Actor::FfuzzyEyes(_)
+            | Actor::FfuzzyPalette(_)
             | Actor::PaletteFade(_)
     )
 }
@@ -218,6 +221,9 @@ fn check_piece(
     engine.level = ram.u8(0xFF_0112);
     engine.control_player_1 = ram.u8(0xFF_1958);
     engine.crowding = ram.u16(0xFF_198C);
+    // The match clock (the CPU plays differently as minutes pass).
+    engine.time_frames = ram.u16(0xFF_05CA);
+    engine.time_minutes = engine.time_frames / 3600;
     for slot in 0..SLOTS {
         engine.slots[slot] = load(ram, slot, tag).or_else(|| {
             used(ram, slot).then_some(if ram.u8(slot_addr(slot) + 1) & 0x80 == 0 { Actor::OpaqueQuick } else { Actor::Opaque })

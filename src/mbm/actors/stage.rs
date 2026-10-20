@@ -848,3 +848,178 @@ impl Engine {
         (!borrow).then_some(s)
     }
 }
+
+/// `loc_6954` (Coconuts' stage, `loc_6946`): the portrait's colors 10 and 12 by
+/// crowding level: steady at 0, a slow pulse at 1 (`word_6A66`, 18 steps every other
+/// frame), a quick one at 2 (`word_6A4E`, 6 steps every 4 frames), the plain palette
+/// at 3.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CoconutsLight {
+    /// False at $6954 (just spawned).
+    pub started: bool,
+    /// +$2A crowding level seen, +$26 step (level 2 counts in its high byte), +$22 wait.
+    pub level: u8,
+    pub counter: u16,
+    pub wait: u8,
+}
+
+pub const COCONUTS_LIGHT_CODE: u32 = 0x695A;
+const COCONUTS_STEADY: u32 = 0x6A4A;
+const COCONUTS_QUICK: u32 = 0x6A4E;
+const COCONUTS_SLOW: u32 = 0x6A66;
+
+/// `loc_6DCE` (Sir Ffuzzy's stage, `loc_6D80`): his eyes, a sprite shown while the
+/// player is crowded (level 2): open for a random while, then a quick blink.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FfuzzyEyes {
+    /// +$06 draw flags, +$09 frame, +$22 wait, +$26 blink counter.
+    pub draw: u8,
+    pub frame: u8,
+    pub wait: u8,
+    pub counter: u16,
+}
+
+pub const FFUZZY_EYES_CODE: u32 = 0x6DCE;
+/// Where the eyes are drawn (+$0A, +$0E) and their mappings (+$08).
+pub const FFUZZY_EYES_AT: (u16, u16) = (0x110, 0xE8);
+pub const FFUZZY_EYES_MAPPINGS: u8 = 0x2F;
+
+/// `loc_6E46` (Sir Ffuzzy's stage): the portrait's colors 13 and 2, 8 steps with waits
+/// by crowding level (`unk_6EE2`, `unk_6F02`; level 3: `unk_6F06`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FfuzzyPalette {
+    /// False at $6E46 (just spawned).
+    pub started: bool,
+    /// +$22 wait, +$26 step.
+    pub wait: u8,
+    pub counter: u16,
+}
+
+pub const FFUZZY_PALETTE_CODE: u32 = 0x6E4C;
+const FFUZZY_WAITS: u32 = 0x6EE2;
+const FFUZZY_COLORS: u32 = 0x6F02;
+const FFUZZY_CROWDED: u32 = 0x6F06;
+
+impl Engine {
+    /// Two colors of the portrait (line 2's while `word_FF1124` is set).
+    fn portrait_colors(&mut self, colors: [(usize, u16); 2]) {
+        let line = if self.portrait_lock != 0 { 2 } else { 3 };
+        for (color, value) in colors {
+            self.palettes[line][color] = value;
+        }
+        self.load_palette(line, PaletteLoad::Buffer);
+    }
+
+    pub(super) fn run_coconuts_light(&mut self, mut c: CoconutsLight) -> Option<CoconutsLight> {
+        if !c.started {
+            c.started = true;
+            return Some(c);
+        }
+        if self.portrait_lock & 0xFF00 != 0 {
+            return None;
+        }
+        let level = self.crowding;
+        if level as u8 != c.level {
+            c.counter = 0;
+            c.level = level as u8;
+        }
+        let at = match level {
+            0 => COCONUTS_STEADY,
+            1 => {
+                if c.wait != 0 {
+                    c.wait -= 1;
+                    return Some(c);
+                }
+                c.wait = 1;
+                c.counter = c.counter.wrapping_add(1);
+                if c.counter == 0x12 {
+                    c.counter = 0;
+                }
+                COCONUTS_SLOW + u32::from(c.counter) * 4
+            }
+            2 => {
+                if self.danger_flash != 0 {
+                    return Some(c);
+                }
+                let mut step = ((c.counter >> 8) as u8).wrapping_add(1);
+                c.counter = (c.counter & 0xFF) | u16::from(step) << 8;
+                if step & 3 != 0 {
+                    return Some(c);
+                }
+                step &= 0x1C;
+                if step == 0x18 {
+                    step = 0;
+                    c.counter &= 0xFF;
+                }
+                COCONUTS_QUICK + u32::from(step)
+            }
+            _ => {
+                // sub_61C0
+                let colors = self.opponent_palette();
+                self.load_palette(3, PaletteLoad::Colors(colors));
+                return Some(c);
+            }
+        };
+        self.portrait_colors([(10, rom::word(at)), (12, rom::word(at + 2))]);
+        Some(c)
+    }
+
+    pub(super) fn run_ffuzzy_eyes(&mut self, mut e: FfuzzyEyes) -> Option<FfuzzyEyes> {
+        if self.portrait_lock & 0xFF00 != 0 {
+            return None;
+        }
+        if self.crowding != 2 {
+            e.draw = 0;
+            e.wait = 0x32;
+            e.frame = 0;
+            return Some(e);
+        }
+        e.draw = 0x80;
+        e.wait = e.wait.wrapping_sub(1);
+        if e.wait != 0 {
+            return Some(e);
+        }
+        e.counter = e.counter.wrapping_add(1);
+        let step = e.counter & 3;
+        e.wait = if step == 0 {
+            e.frame = 0;
+            self.random() as u8 & 0x3F
+        } else if step & 1 != 0 {
+            e.frame = 1;
+            6
+        } else {
+            e.frame = 2;
+            5
+        };
+        Some(e)
+    }
+
+    pub(super) fn run_ffuzzy_palette(&mut self, mut p: FfuzzyPalette) -> Option<FfuzzyPalette> {
+        if !p.started {
+            p.started = true;
+            return Some(p);
+        }
+        if self.portrait_lock & 0xFF00 != 0 {
+            return None;
+        }
+        if self.danger_flash != 0 {
+            return Some(p);
+        }
+        p.wait = p.wait.wrapping_sub(1);
+        if p.wait != 0 {
+            return Some(p);
+        }
+        let step = (p.counter as u8).wrapping_add(1) & 7;
+        p.counter = (p.counter & 0xFF00) | u16::from(step);
+        let level = self.crowding;
+        let at = if level as u8 == 3 {
+            FFUZZY_CROWDED
+        } else {
+            let i = u32::from(level << 3) + u32::from(step);
+            p.wait = rom::byte(FFUZZY_WAITS + (i & 0xFFFF));
+            FFUZZY_COLORS + u32::from(step) * 4
+        };
+        self.portrait_colors([(13, rom::word(at)), (2, rom::word(at + 2))]);
+        Some(p)
+    }
+}
