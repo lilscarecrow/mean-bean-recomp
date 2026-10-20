@@ -75,6 +75,8 @@ const BANNER_BOTTOM: u32 = 0x1A146;
 const BANNER_AT: u16 = 0xC204;
 /// `sub_7D78`'s entry when there's no time bonus.
 pub const NO_BONUS_TEXT: u8 = 5;
+/// `loc_7E68`'s entry after the last stage.
+pub const FINAL_TEXT: u8 = 0x16;
 /// The results' lines over P1's field (`DrawPlayerText`, 10 characters, base $A500):
 /// `byte_1A20C`/`byte_1A216` (time), `unk_1A25C`/`unk_1A266` (bonus), `unk_1A38E`
 /// (over the password); and where their numbers go (5 digits, base $8500).

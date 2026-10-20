@@ -125,6 +125,7 @@ pub enum Actor {
     BgSpark(BgSpark),
     ShakeField(ShakeField),
     NameEntry(NameEntry),
+    RobotnikVoice(RobotnikVoice),
 }
 
 impl Actor {
@@ -143,6 +144,7 @@ impl Actor {
                 | Actor::StarSpark(_)
                 | Actor::BouncingBean(_)
                 | Actor::BounceSparkle(_)
+                | Actor::RobotnikVoice(_)
                 | Actor::ShakeField(_)
         )
     }
@@ -173,6 +175,7 @@ impl Actor {
             Actor::PortraitPalette(p) => Some(if p.started { PORTRAIT_PALETTE_CODE } else { 0x6F38 }),
             Actor::CoconutsLight(c) => Some(if c.started { COCONUTS_LIGHT_CODE } else { 0x6954 }),
             Actor::FfuzzyEyes(_) => Some(FFUZZY_EYES_CODE),
+            Actor::RobotnikVoice(v) => Some(v.code()),
             Actor::FfuzzyPalette(p) => Some(if p.started { FFUZZY_PALETTE_CODE } else { 0x6E46 }),
             Actor::PaletteFade(_) => Some(PALETTE_FADE_CODE),
             Actor::Star(s) => Some(s.state.code()),
@@ -245,6 +248,10 @@ pub enum PlayerState {
     NoBonus,
     /// $7EA4: wait for a button.
     Continue,
+    /// `loc_7E68` (the last stage won): the ending text shows, then the game flow.
+    FinalWait,
+    FinalLeave,
+    FinalDone,
     /// $7EB0 / $7EB8: done; the game flow takes over.
     Leave,
     Done,
@@ -302,6 +309,9 @@ impl PlayerState {
             PlayerState::Continue => 0x7EA4,
             PlayerState::Leave => 0x7EB0,
             PlayerState::Done => 0x7EB8,
+            PlayerState::FinalWait => 0x7E86,
+            PlayerState::FinalLeave => 0x7E8C,
+            PlayerState::FinalDone => 0x7E94,
             PlayerState::ContinueWait => 0x7ED6,
             PlayerState::HighScore => 0x7EDC,
             PlayerState::ContinueCheck => 0x7EF6,
@@ -1203,6 +1213,7 @@ impl Engine {
                 Actor::PortraitPalette(pt) => self.run_portrait_palette(pt).map(Actor::PortraitPalette),
                 Actor::CoconutsLight(c) => self.run_coconuts_light(c).map(Actor::CoconutsLight),
                 Actor::FfuzzyEyes(e) => self.run_ffuzzy_eyes(e).map(Actor::FfuzzyEyes),
+                Actor::RobotnikVoice(v) => self.run_voice(v).map(Actor::RobotnikVoice),
                 Actor::FfuzzyPalette(p) => self.run_ffuzzy_palette(p).map(Actor::FfuzzyPalette),
                 Actor::PaletteFade(pf) => self.run_palette_fade(pf).map(Actor::PaletteFade),
                 Actor::Star(st) => self.run_star(st).map(Actor::Star),
@@ -1402,7 +1413,7 @@ impl Engine {
                 }
             }
             TopOut => self.announce_result(&mut p)?,
-            Wipe | Cleared | ResultsWait | ResultsShown | BonusWait | Bonus | TallyWait | Tally | NoBonusWait | NoBonus
+            Wipe | Cleared | ResultsWait | ResultsShown | BonusWait | Bonus | TallyWait | Tally | NoBonusWait | NoBonus | FinalWait | FinalLeave | FinalDone
             | Continue | Leave | Done | ContinueWait | HighScore | ContinueCheck | ContinueDone => {
                 if !self.run_results(&mut p, inputs)? {
                     return Ok(None);

@@ -141,6 +141,9 @@ pub fn load(ram: &Ram, slot: usize, tag: u8) -> Option<Actor> {
         PlayerState::HighScore,
         PlayerState::ContinueCheck,
         PlayerState::ContinueDone,
+        PlayerState::FinalWait,
+        PlayerState::FinalLeave,
+        PlayerState::FinalDone,
     ]
     .into_iter()
     .find(|s| s.code() == code);
@@ -500,6 +503,11 @@ fn load_stage(ram: &Ram, a: u32, code: u32) -> Option<Actor> {
             counter: ram.u16(a + 0x26),
             wait: ram.u8(a + 0x22),
         }),
+        0x7C2C | 0x7C38 | 0x7BF0 | 0x7BFC => Actor::RobotnikVoice(RobotnikVoice {
+            line: if code >= 0x7C2C { RobotnikVoice::VICTORY } else { RobotnikVoice::DEFEAT },
+            started: code == 0x7C38 || code == 0x7BFC,
+            wait: ram.u16(a + 0x26),
+        }),
         FFUZZY_EYES_CODE => Actor::FfuzzyEyes(FfuzzyEyes { draw: ram.u8(a + 6), frame: ram.u8(a + 9), wait: ram.u8(a + 0x22), counter: ram.u16(a + 0x26) }),
         FFUZZY_PALETTE_CODE | 0x6E46 => {
             Actor::FfuzzyPalette(FfuzzyPalette { started: code == FFUZZY_PALETTE_CODE, wait: ram.u8(a + 0x22), counter: ram.u16(a + 0x26) })
@@ -629,6 +637,7 @@ pub fn describe(actor: &Actor) -> String {
         Actor::PasswordBean(b) => format!("password bean color {:02X} at {:X},{:X} anim {:?}", b.color, b.x, b.y, b.anim),
         Actor::PortraitPalette(pt) => format!("portrait palette wait {} step {:04X} level {}", pt.wait, pt.step, pt.level),
         Actor::CoconutsLight(c) => format!("coconuts light {} level {} step {:04X} wait {}", c.started, c.level, c.counter, c.wait),
+        Actor::RobotnikVoice(v) => format!("robotnik voice {:02X} {} wait {:04X}", v.line, v.started, if v.started { v.wait } else { 0 }),
         Actor::FfuzzyEyes(e) => format!("ffuzzy eyes draw {:02X} frame {} wait {} count {:04X}", e.draw, e.frame, e.wait, e.counter),
         Actor::FfuzzyPalette(p) => format!("ffuzzy palette {} wait {} step {:04X}", p.started, p.wait, p.counter),
         Actor::Glow(g) => format!(

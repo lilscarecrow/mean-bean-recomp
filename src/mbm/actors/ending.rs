@@ -103,6 +103,27 @@ pub struct Banner {
     pub timer: u16,
 }
 
+/// `loc_7C2C` (`sub_7C14`, Robotnik won) / `loc_7BF0` (`sub_7BD8`, he lost): waits
+/// +$26 frames, then plays his line (sound $6B / $90).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RobotnikVoice {
+    /// The sound: `VICTORY` or `DEFEAT`.
+    pub line: u8,
+    /// False at the spawn address (+$26 not set yet).
+    pub started: bool,
+    pub wait: u16,
+}
+
+impl RobotnikVoice {
+    pub const VICTORY: u8 = 0x6B;
+    pub const DEFEAT: u8 = 0x90;
+
+    pub fn code(&self) -> u32 {
+        let spawn = if self.line == Self::VICTORY { 0x7C2C } else { 0x7BF0 };
+        if self.started { spawn + 12 } else { spawn }
+    }
+}
+
 /// `loc_833E`: wipes the loser's field tiles; tells the loser when done.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FieldWipe {
@@ -159,7 +180,7 @@ impl Engine {
             // P2 won: the CPU's actor goes, P1's field falls away, then "continue?".
             self.delete_player(p.other_slot); // ActorDeleteOther
             if self.opponent == OPP_ROBOTNIK {
-                return Err(Unported("Robotnik's victory voice (sub_7C14)"));
+                self.spawn_voice(RobotnikVoice::VICTORY); // sub_7C14
             }
             self.wipe_field(p);
             p.state = PlayerState::Wipe;
@@ -177,7 +198,12 @@ impl Engine {
         self.result_score = winner.score.wrapping_add(u32::from(p.base)).min(99_999_999);
         self.result_beans = winner.beans_total;
         if self.level == 0x0F || self.level == 2 {
-            return Err(Unported("high score entry (sub_C438)"));
+            // loc_7BB6: the last stage (or lesson) files the winner's score with the
+            // time bonus in the high score table now; the name is entered later.
+            let mut entry = winner.clone();
+            entry.score = self.result_score;
+            self.high_score_table = self.level_mode;
+            self.enter_high_score(&entry);
         }
         self.delete_player(p.other_slot); // ActorDeleteOther
         if let Some(slot) = self.find_actor_slot() {
@@ -185,7 +211,7 @@ impl Engine {
         }
         self.spawn_stars(FIELD_X[0] + 0x10);
         if self.opponent == OPP_ROBOTNIK {
-            return Err(Unported("Robotnik's defeat voice (sub_7BD8)"));
+            self.spawn_voice(RobotnikVoice::DEFEAT); // sub_7BD8
         }
         self.wipe_field(p);
         p.state = PlayerState::Wipe;
@@ -199,6 +225,25 @@ impl Engine {
                 self.orphan_fall = Some((slot, p.id, work));
             }
         }
+    }
+
+    /// `FindActorSlotQuick` for one of Robotnik's lines.
+    fn spawn_voice(&mut self, line: u8) {
+        if let Some(slot) = self.free_slot() {
+            self.slots[slot] = Some(Actor::RobotnikVoice(RobotnikVoice { line, started: false, wait: 0 }));
+        }
+    }
+
+    /// `loc_7C2C` / `loc_7BF0`: a pause, then Robotnik's line (the sound isn't ported).
+    pub(super) fn run_voice(&mut self, mut v: RobotnikVoice) -> Option<RobotnikVoice> {
+        if !v.started {
+            v.started = true;
+            v.wait = if v.line == RobotnikVoice::VICTORY { 0x20 } else { 0x10 };
+            return Some(v);
+        }
+        v.wait = v.wait.wrapping_sub(1);
+        // bpl: past 0 the sample plays and the actor ends.
+        (v.wait & 0x8000 == 0).then_some(v)
     }
 
     /// `sub_7078`: four stars from the winner's field (left edge `x0`).
@@ -347,8 +392,8 @@ impl Engine {
                     add_points(p, u32::from(p.base));
                     self.queue_panel(PanelCommand::Score(p.id));
                     self.queue_panel(PanelCommand::Bonus(0)); // $99000000
-                    self.show_password()?;
-                    p.state = Continue; // the bookmark at $7E9E (no delay left)
+                    let next = self.after_results(p);
+                    p.state = next; // the bookmark at $7E9E (no delay left)
                 } else if p.w26 < 0x780 && p.base != 0 {
                     // loc_7D1A
                     let step = p.base.min(p.w28);
@@ -364,8 +409,17 @@ impl Engine {
                 }
             }
             NoBonus => {
-                self.show_password()?;
-                p.state = Continue;
+                let next = self.after_results(p);
+                p.state = next;
+            }
+            FinalWait => {
+                if wait(&mut p.delay) {
+                    p.state = FinalLeave;
+                }
+            }
+            FinalLeave => {
+                p.flags = 0;
+                p.state = FinalDone;
             }
             Continue => {
                 p.delay = 0x0A;
@@ -377,7 +431,7 @@ impl Engine {
                 p.flags = 0;
                 p.state = Done;
             }
-            Done | ContinueDone => {
+            Done | ContinueDone | FinalDone => {
                 self.match_over = true; // bytecode_disabled = 0: the game flow resumes
                 return Ok(false);
             }
@@ -612,13 +666,16 @@ impl Engine {
         Some(s)
     }
 
-    /// `loc_7E56`: on to the next stage; `sub_7D62` queues the password (plane $9E).
-    fn show_password(&mut self) -> Result<(), Unported> {
+    /// `loc_7E56`: on to the next stage: `sub_7D62` queues the password (plane $9E); after
+    /// the last stage, `loc_7E68` shows the ending text for $78 frames instead.
+    fn after_results(&mut self, p: &mut Player) -> PlayerState {
         if self.level == 0x0F {
-            return Err(Unported("the final stage's ending (loc_7E68)"));
+            self.queue_panel(PanelCommand::Text { entry: FINAL_TEXT, blink: 0, player: 0 });
+            p.delay = 0x78;
+            return PlayerState::FinalWait;
         }
         self.password_command = true;
-        Ok(())
+        PlayerState::Continue
     }
 
     /// `SpecPlane9E` (in the vertical blank): the password for the next stage and its
