@@ -15,6 +15,7 @@ pub mod bean_order;
 pub mod field;
 pub mod game;
 pub mod motion;
+pub mod netplay;
 pub mod pad;
 pub mod pair;
 pub mod render;

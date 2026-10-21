@@ -1,0 +1,526 @@
+//! Playing over the network: two copies of the game kept in step by trading pad inputs
+//! (delay-based lockstep). The engine is deterministic, so if both sides start from the
+//! same seed and feed [`Game::frame`](crate::game::Game::frame) the same two pads every
+//! frame, they play the same game; only the buttons cross the wire.
+//!
+//! Each side's input for frame `f` is the buttons it read `delay` frames earlier, which
+//! gives the packet that long to arrive. A side that doesn't have the other's input for
+//! the next frame yet waits (the game holds still), so the two never drift apart. Every
+//! packet carries all the inputs the peer hasn't acknowledged yet, so a lost packet
+//! costs nothing but the wait for the next one.
+//!
+//! The host is player 1 and picks the seed and the delay; whoever joins is player 2.
+//! Both must run the same ROM (checked when they connect), and every [`CHECK_EVERY`]
+//! frames each side sends a checksum of its game so a desync is caught, not played on.
+//!
+//! Packets (UDP): `"MBMN"`, version, kind, then
+//! - hello (joiner to host): ROM hash (u64)
+//! - welcome (host to joiner): seed (u32), delay (u8)
+//! - reject: the reason, as text
+//! - inputs: frames of ours the sender has (u32), first frame here (u32), checksum
+//!   frame (u32) and value (u32), then one button byte per frame
+//! - bye: nothing
+//!
+//! Numbers are big-endian.
+
+use std::collections::VecDeque;
+use std::io;
+use std::net::{SocketAddr, ToSocketAddrs, UdpSocket};
+use std::time::{Duration, Instant};
+
+pub const DEFAULT_PORT: u16 = 7845;
+/// Frames between reading a pad and playing it: 3 frames (50ms) covers a LAN or a
+/// nearby connection.
+pub const DEFAULT_DELAY: u8 = 3;
+/// The most delay the host may ask for (half a second).
+pub const MAX_DELAY: u8 = 30;
+/// How often (in frames) the two sides compare checksums.
+pub const CHECK_EVERY: u32 = 60;
+
+const MAGIC: &[u8; 4] = b"MBMN";
+const VERSION: u8 = 1;
+const HELLO: u8 = 0;
+const WELCOME: u8 = 1;
+const REJECT: u8 = 2;
+const INPUTS: u8 = 3;
+const BYE: u8 = 4;
+
+/// How often an unanswered hello is sent again.
+const RESEND: Duration = Duration::from_millis(250);
+/// Silence after which the peer counts as gone.
+const TIMEOUT: Duration = Duration::from_secs(5);
+/// Most inputs in one packet (2 seconds' worth; a peer further behind than that waits).
+const MAX_INPUTS: usize = 120;
+/// Our own checksums kept to compare with the peer's.
+const CHECKS_KEPT: usize = 16;
+
+/// Where the connection is.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum State {
+    /// Hosting, nobody has joined yet.
+    Waiting,
+    /// Joining, the host hasn't answered yet.
+    Connecting,
+    Playing,
+    /// Over, and why.
+    Closed(String),
+}
+
+pub struct Session {
+    sock: UdpSocket,
+    peer: Option<SocketAddr>,
+    host: bool,
+    rom_hash: u64,
+    seed: u32,
+    delay: u8,
+    state: State,
+    /// Our buttons by frame, and the peer's (both start with `delay` frames of nothing).
+    local: Vec<u8>,
+    remote: Vec<u8>,
+    /// How many of `local` the peer has.
+    acked: u32,
+    /// Our recent checksums (frame, value), and the peer's latest.
+    checks: VecDeque<(u32, u32)>,
+    peer_check: Option<(u32, u32)>,
+    last_hello: Option<Instant>,
+    last_heard: Instant,
+    /// Tests: drop every nth packet we send.
+    #[cfg(test)]
+    lose_every: u32,
+    #[cfg(test)]
+    sent: u32,
+}
+
+impl Session {
+    /// Hosts on `port` (all IPv4 interfaces) as player 1, starting the game from `seed`
+    /// with `delay` frames of input delay.
+    pub fn host(port: u16, rom_hash: u64, seed: u32, delay: u8) -> io::Result<Session> {
+        let sock = UdpSocket::bind(("0.0.0.0", port))?;
+        Self::new(sock, None, true, rom_hash, seed, delay.min(MAX_DELAY), State::Waiting)
+    }
+
+    /// Joins the host at `addr` ("ip:port", or just "ip" for the default port) as
+    /// player 2.
+    pub fn join(addr: &str, rom_hash: u64) -> io::Result<Session> {
+        let peer = resolve(addr)?;
+        let any: SocketAddr = if peer.is_ipv4() { "0.0.0.0:0" } else { "[::]:0" }.parse().unwrap();
+        let sock = UdpSocket::bind(any)?;
+        Self::new(sock, Some(peer), false, rom_hash, 0, 0, State::Connecting)
+    }
+
+    fn new(sock: UdpSocket, peer: Option<SocketAddr>, host: bool, rom_hash: u64, seed: u32, delay: u8, state: State) -> io::Result<Session> {
+        sock.set_nonblocking(true)?;
+        let mut s = Session {
+            sock,
+            peer,
+            host,
+            rom_hash,
+            seed,
+            delay: 0,
+            state,
+            local: vec![],
+            remote: vec![],
+            acked: 0,
+            checks: VecDeque::new(),
+            peer_check: None,
+            last_hello: None,
+            last_heard: Instant::now(),
+            #[cfg(test)]
+            lose_every: 0,
+            #[cfg(test)]
+            sent: 0,
+        };
+        s.set_delay(delay);
+        Ok(s)
+    }
+
+    fn set_delay(&mut self, delay: u8) {
+        self.delay = delay;
+        self.local = vec![0; usize::from(delay)];
+        self.remote = vec![0; usize::from(delay)];
+        self.acked = u32::from(delay);
+    }
+
+    pub fn state(&self) -> &State {
+        &self.state
+    }
+
+    /// The seed both sides start the game from (the host's; known to the joiner once
+    /// playing).
+    pub fn seed(&self) -> u32 {
+        self.seed
+    }
+
+    pub fn delay(&self) -> u8 {
+        self.delay
+    }
+
+    /// Our pad: 0 (player 1) when hosting, 1 when joined.
+    pub fn side(&self) -> usize {
+        if self.host { 0 } else { 1 }
+    }
+
+    /// The port we're on (useful when hosting on port 0).
+    pub fn port(&self) -> io::Result<u16> {
+        Ok(self.sock.local_addr()?.port())
+    }
+
+    pub fn peer(&self) -> Option<SocketAddr> {
+        self.peer
+    }
+
+    /// Reads whatever has arrived. Call once a tick, before [`step`](Self::step).
+    pub fn receive(&mut self) {
+        let mut buf = [0u8; 512];
+        loop {
+            match self.sock.recv_from(&mut buf) {
+                Ok((n, from)) => self.handle(&buf[..n], from),
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
+                // (on some systems an ICMP "port unreachable" shows up here: the host
+                // isn't up yet, or has gone; the timeout handles both)
+                Err(_) => break,
+            }
+        }
+        let quiet = matches!(self.state, State::Playing) || (!self.host && self.state == State::Connecting);
+        if quiet && self.last_heard.elapsed() > TIMEOUT {
+            self.close(if self.state == State::Playing { "the other player stopped answering" } else { "no answer from the host" });
+        }
+    }
+
+    /// Records our buttons (read now) for frame `frame + delay`, and returns both pads
+    /// for `frame` if the peer's have arrived. `frame` is the next frame to play.
+    pub fn step(&mut self, frame: u32, buttons: u8) -> Option<[u8; 2]> {
+        if self.state != State::Playing {
+            return None;
+        }
+        let ahead = frame as usize + usize::from(self.delay);
+        // (only as many as playing `frame` needs: waiting doesn't pile inputs up)
+        while self.local.len() <= ahead {
+            self.local.push(buttons);
+        }
+        let f = frame as usize;
+        let (ours, theirs) = (*self.local.get(f)?, *self.remote.get(f)?);
+        Some(if self.host { [ours, theirs] } else { [theirs, ours] })
+    }
+
+    /// Whether the peer is far enough ahead that we should play an extra frame this tick
+    /// to catch up (`frame` is the next frame to play).
+    pub fn behind(&self, frame: u32) -> bool {
+        self.remote.len() > frame as usize + usize::from(self.delay) + 2
+    }
+
+    /// Our checksum of the game after `frame` frames, to compare with the peer's.
+    pub fn check(&mut self, frame: u32, value: u32) {
+        if self.checks.len() == CHECKS_KEPT {
+            self.checks.pop_front();
+        }
+        self.checks.push_back((frame, value));
+        self.compare();
+    }
+
+    /// Sends what the peer needs. Call once a tick, after playing.
+    pub fn send(&mut self) {
+        let Some(peer) = self.peer else { return };
+        match self.state {
+            State::Connecting => {
+                if self.last_hello.is_none_or(|t| t.elapsed() >= RESEND) {
+                    self.last_hello = Some(Instant::now());
+                    let mut p = header(HELLO);
+                    p.extend_from_slice(&self.rom_hash.to_be_bytes());
+                    self.send_to(&p, peer);
+                }
+            }
+            State::Playing => {
+                let mut p = header(INPUTS);
+                let from = (self.acked as usize).min(self.local.len());
+                let to = self.local.len().min(from + MAX_INPUTS);
+                let (cf, cv) = self.checks.back().copied().unwrap_or((0, 0));
+                for n in [self.remote.len() as u32, from as u32, cf, cv] {
+                    p.extend_from_slice(&n.to_be_bytes());
+                }
+                p.extend_from_slice(&self.local[from..to]);
+                self.send_to(&p, peer);
+            }
+            State::Waiting | State::Closed(_) => {}
+        }
+    }
+
+    /// Tells the peer we're leaving.
+    pub fn leave(&mut self) {
+        if let (Some(peer), State::Playing | State::Connecting) = (self.peer, &self.state) {
+            self.send_to(&header(BYE), peer);
+        }
+        self.close("left");
+    }
+
+    fn close(&mut self, why: &str) {
+        if !matches!(self.state, State::Closed(_)) {
+            self.state = State::Closed(why.into());
+        }
+    }
+
+    fn send_to(&mut self, p: &[u8], to: SocketAddr) {
+        #[cfg(test)]
+        {
+            self.sent += 1;
+            if self.lose_every != 0 && self.sent.is_multiple_of(self.lose_every) {
+                return;
+            }
+        }
+        // (a full send buffer just loses the packet, like the network would)
+        let _ = self.sock.send_to(p, to);
+    }
+
+    fn reject(&mut self, to: SocketAddr, why: &str) {
+        let mut p = header(REJECT);
+        p.extend_from_slice(why.as_bytes());
+        self.send_to(&p, to);
+    }
+
+    fn handle(&mut self, p: &[u8], from: SocketAddr) {
+        if p.len() < 6 || &p[..4] != MAGIC {
+            return;
+        }
+        let (version, kind, body) = (p[4], p[5], &p[6..]);
+        if self.host && kind == HELLO && matches!(self.state, State::Closed(_)) {
+            return;
+        }
+        if self.host && kind == HELLO && self.peer.is_none_or(|peer| peer == from) {
+            if version != VERSION {
+                return self.reject(from, "a different version of the game");
+            }
+            let Some(hash) = body.get(..8) else { return };
+            if u64::from_be_bytes(hash.try_into().unwrap()) != self.rom_hash {
+                return self.reject(from, "a different ROM");
+            }
+            if self.state == State::Waiting {
+                self.peer = Some(from);
+                self.state = State::Playing;
+                self.last_heard = Instant::now();
+            }
+            // (again for every hello: the last welcome may have been lost)
+            let mut w = header(WELCOME);
+            w.extend_from_slice(&self.seed.to_be_bytes());
+            w.push(self.delay);
+            self.send_to(&w, from);
+            return;
+        }
+        if self.host && kind == HELLO {
+            return self.reject(from, "the host already has a player");
+        }
+        if Some(from) != self.peer || version != VERSION {
+            return;
+        }
+        self.last_heard = Instant::now();
+        match kind {
+            WELCOME if self.state == State::Connecting && body.len() >= 5 => {
+                self.seed = u32::from_be_bytes(body[..4].try_into().unwrap());
+                self.set_delay(body[4].min(MAX_DELAY));
+                self.state = State::Playing;
+            }
+            REJECT if self.state == State::Connecting => {
+                self.close(&format!("the host turned us away: {}", String::from_utf8_lossy(body)));
+            }
+            INPUTS if self.state == State::Playing && body.len() >= 16 => {
+                let word = |i: usize| u32::from_be_bytes(body[i * 4..i * 4 + 4].try_into().unwrap());
+                let (ack, start, cf, cv) = (word(0), word(1), word(2), word(3));
+                let inputs = &body[16..];
+                self.acked = self.acked.max(ack.min(self.local.len() as u32));
+                // Only what follows on from what we have (a gap is sent again).
+                let have = self.remote.len();
+                let start = start as usize;
+                if start <= have && start + inputs.len() > have {
+                    self.remote.extend_from_slice(&inputs[have - start..]);
+                }
+                if cf != 0 {
+                    self.peer_check = Some((cf, cv));
+                    self.compare();
+                }
+            }
+            BYE if matches!(self.state, State::Playing | State::Connecting) => self.close("the other player left"),
+            _ => {}
+        }
+    }
+
+    fn compare(&mut self) {
+        let Some((frame, theirs)) = self.peer_check else { return };
+        if let Some(&(_, ours)) = self.checks.iter().find(|(f, _)| *f == frame)
+            && ours != theirs
+        {
+            self.close(&format!("out of sync at frame {frame}"));
+        }
+    }
+}
+
+fn header(kind: u8) -> Vec<u8> {
+    let mut p = MAGIC.to_vec();
+    p.extend_from_slice(&[VERSION, kind]);
+    p
+}
+
+fn resolve(addr: &str) -> io::Result<SocketAddr> {
+    let with_port = |a: &str| a.to_socket_addrs().ok().and_then(|mut i| i.next());
+    with_port(addr)
+        .or_else(|| with_port(&format!("{addr}:{DEFAULT_PORT}")))
+        .or_else(|| with_port(&format!("[{addr}]:{DEFAULT_PORT}")))
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, format!("can't find {addr}")))
+}
+
+/// FNV-1a: tells two ROMs (or two games' states) apart, nothing more.
+pub fn hash(bytes: &[u8]) -> u64 {
+    bytes.iter().fold(0xCBF2_9CE4_8422_2325, |h, &b| (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01B3))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Runs a host and a joiner on localhost until both have played `frames` frames, each
+    /// pressing its own made-up buttons, and returns what each side played.
+    fn play(frames: u32, lose_every: u32, delay: u8) -> (Vec<[u8; 2]>, Vec<[u8; 2]>) {
+        let mut host = Session::host(0, 7, 0xDEAD_BEEF, delay).unwrap();
+        let port = host.port().unwrap();
+        let mut join = Session::join(&format!("127.0.0.1:{port}"), 7).unwrap();
+        host.lose_every = lose_every;
+        join.lose_every = lose_every;
+        let mut played = (vec![], vec![]);
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let mut tick = 0u32;
+        while (played.0.len() as u32) < frames || (played.1.len() as u32) < frames {
+            assert!(Instant::now() < deadline, "stuck at {} / {} frames", played.0.len(), played.1.len());
+            tick += 1;
+            for (s, out, salt) in [(&mut host, &mut played.0, 0x11u32), (&mut join, &mut played.1, 0x5A)] {
+                s.receive();
+                let f = out.len() as u32;
+                if f < frames {
+                    // Buttons that change with time and differ between sides.
+                    let b = (tick.wrapping_mul(2_654_435_761) >> 24) as u8 ^ salt as u8;
+                    if let Some(p) = s.step(f, b) {
+                        out.push(p);
+                        if (f + 1).is_multiple_of(CHECK_EVERY) {
+                            s.check(f + 1, p[0] as u32 * 256 + p[1] as u32 + f);
+                        }
+                    }
+                }
+                s.send();
+                assert!(!matches!(s.state(), State::Closed(_)), "{:?}", s.state());
+            }
+            std::thread::sleep(Duration::from_micros(200));
+        }
+        assert_eq!(join.seed(), 0xDEAD_BEEF);
+        assert_eq!(join.delay(), delay);
+        (played.0, played.1)
+    }
+
+    #[test]
+    fn both_sides_play_the_same_inputs() {
+        let (a, b) = play(600, 0, DEFAULT_DELAY);
+        assert_eq!(a, b);
+        // The first `delay` frames are nothing; after that, each side's own buttons.
+        assert!(a[..3].iter().all(|p| *p == [0, 0]));
+        assert!(a.iter().any(|p| p[0] != 0) && a.iter().any(|p| p[1] != 0));
+    }
+
+    #[test]
+    fn lost_packets_only_cost_time() {
+        let (a, b) = play(600, 3, 2);
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn no_delay_still_works() {
+        let (a, b) = play(200, 0, 0);
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn a_different_rom_is_turned_away() {
+        let mut host = Session::host(0, 1, 0, DEFAULT_DELAY).unwrap();
+        let mut join = Session::join(&format!("127.0.0.1:{}", host.port().unwrap()), 2).unwrap();
+        for _ in 0..200 {
+            join.send();
+            host.receive();
+            join.receive();
+            if matches!(join.state(), State::Closed(_)) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert_eq!(*host.state(), State::Waiting);
+        assert!(matches!(join.state(), State::Closed(why) if why.contains("different ROM")), "{:?}", join.state());
+    }
+
+    #[test]
+    fn a_desync_is_noticed() {
+        let mut host = Session::host(0, 1, 0, 0).unwrap();
+        let mut join = Session::join(&format!("127.0.0.1:{}", host.port().unwrap()), 1).unwrap();
+        for _ in 0..200 {
+            for s in [&mut host, &mut join] {
+                s.receive();
+                s.send();
+            }
+            if host.state() == &State::Playing && join.state() == &State::Playing {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        host.check(60, 1);
+        join.check(60, 2);
+        for _ in 0..200 {
+            for s in [&mut host, &mut join] {
+                s.send();
+                s.receive();
+            }
+            if matches!(host.state(), State::Closed(_)) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert_eq!(*host.state(), State::Closed("out of sync at frame 60".into()));
+    }
+
+    #[test]
+    fn leaving_tells_the_other_side() {
+        let mut host = Session::host(0, 1, 0, 0).unwrap();
+        let mut join = Session::join(&format!("127.0.0.1:{}", host.port().unwrap()), 1).unwrap();
+        for _ in 0..200 {
+            for s in [&mut host, &mut join] {
+                s.receive();
+                s.send();
+            }
+            if join.state() == &State::Playing {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        join.leave();
+        for _ in 0..200 {
+            host.receive();
+            if matches!(host.state(), State::Closed(_)) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert_eq!(*host.state(), State::Closed("the other player left".into()));
+    }
+
+    #[test]
+    fn junk_is_ignored() {
+        let mut host = Session::host(0, 99, 0, 0).unwrap();
+        let junk = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let to = ("127.0.0.1", host.port().unwrap());
+        for p in [&b""[..], b"MBMN", b"MBMN\x01\x00", b"MBMN\x01\x03\x00", b"hello there", b"MBMN\x01\x00\x00\x00\x00\x00\x00\x00\x00\x01"] {
+            junk.send_to(p, to).unwrap();
+        }
+        std::thread::sleep(Duration::from_millis(20));
+        host.receive();
+        assert_eq!(*host.state(), State::Waiting);
+    }
+
+    #[test]
+    fn addresses_without_a_port_get_the_default() {
+        assert_eq!(resolve("127.0.0.1").unwrap(), "127.0.0.1:7845".parse().unwrap());
+        assert_eq!(resolve("127.0.0.1:9000").unwrap(), "127.0.0.1:9000".parse().unwrap());
+        assert_eq!(resolve("::1").unwrap(), "[::1]:7845".parse().unwrap());
+    }
+}

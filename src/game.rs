@@ -194,6 +194,14 @@ impl Game {
         self.engine.match_over = false;
     }
 
+    /// A cheap fingerprint of where the game is (the random seed, how often it was drawn
+    /// from and the game flow's place): two copies that differ here have desynced. The
+    /// game draws from the generator every frame, so a difference shows up quickly.
+    pub fn checksum(&self) -> u32 {
+        let e = &self.engine;
+        e.rng.seed ^ e.rng_calls.rotate_left(16) ^ e.bytecode_pc.wrapping_mul(0x9E37_79B9)
+    }
+
     /// The VDP layout the registers set.
     fn layout(&self) -> Layout {
         let mut regs = [0u8; 24];
