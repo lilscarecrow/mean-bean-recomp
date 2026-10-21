@@ -11,6 +11,10 @@
 //! be sure. A side that gets [`MAX_ROLLBACK`] frames past what it has heard from the
 //! other waits, and a side that's ahead of the other skips a tick now and then, so the
 //! two keep pace.
+//!
+//! Sounds stay out of the copied state: each frame played reports its requests to a
+//! [`SoundLog`], which starts only what a replayed frame didn't already start (see
+//! [`crate::sound`]).
 
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -18,6 +22,7 @@ use std::sync::Arc;
 use crate::game::{Game, Status};
 use crate::netmenu::Lobby;
 use crate::netplay::{Session, State, CHECK_EVERY};
+use crate::sound::{Cue, Sound, SoundLog};
 
 /// Furthest we play past the other player's last known buttons (12 frames: 200ms).
 pub const MAX_ROLLBACK: u32 = 12;
@@ -29,6 +34,10 @@ pub trait Sim: Clone {
     fn step(&mut self, pads: [u8; 2]);
     /// A fingerprint of the state, for the desync check.
     fn checksum(&self) -> u32;
+    /// The sounds the last step asked for.
+    fn sounds(&self) -> &[Sound] {
+        &[]
+    }
 }
 
 pub struct Rollback<S> {
@@ -42,6 +51,7 @@ pub struct Rollback<S> {
     saved: VecDeque<(S, u8)>,
     ticks: u32,
     last_wait: u32,
+    sound: SoundLog,
     /// Times we went back, and frames played again.
     pub rollbacks: u32,
     pub replayed: u32,
@@ -49,7 +59,7 @@ pub struct Rollback<S> {
 
 impl<S: Sim> Rollback<S> {
     pub fn new(state: S) -> Rollback<S> {
-        Rollback { state, frame: 0, confirmed: 0, saved: VecDeque::new(), ticks: 0, last_wait: 0, rollbacks: 0, replayed: 0 }
+        Rollback { state, frame: 0, confirmed: 0, saved: VecDeque::new(), ticks: 0, last_wait: 0, sound: SoundLog::default(), rollbacks: 0, replayed: 0 }
     }
 
     /// The game as it stands (what to show).
@@ -65,6 +75,11 @@ impl<S: Sim> Rollback<S> {
     /// Frames played with both players' real buttons.
     pub fn confirmed(&self) -> u32 {
         self.confirmed
+    }
+
+    /// What the sound player should start (or cancel) since last asked.
+    pub fn take_cues(&mut self) -> Vec<Cue> {
+        self.sound.take()
     }
 
     /// One tick (after [`Session::receive`], before [`Session::send`]): puts right the
@@ -117,6 +132,7 @@ impl<S: Sim> Rollback<S> {
         }
         self.saved.drain(..(known - self.confirmed) as usize);
         self.confirmed = known;
+        self.sound.confirm(known);
     }
 
     /// Plays frame `frame` with our buttons and the other player's (or the guess).
@@ -127,6 +143,7 @@ impl<S: Sim> Rollback<S> {
         let pads = if net.side() == 0 { [ours, theirs] } else { [theirs, ours] };
         self.saved.push_back((self.state.clone(), theirs));
         self.state.step(pads);
+        self.sound.played(f, self.state.sounds());
         self.frame += 1;
     }
 }
@@ -139,6 +156,10 @@ impl Sim for Game {
     fn checksum(&self) -> u32 {
         Game::checksum(self)
     }
+
+    fn sounds(&self) -> &[Sound] {
+        Game::sounds(self)
+    }
 }
 
 /// A network game: the lobby until both players are ready, then the match, which
@@ -150,16 +171,19 @@ pub struct Online {
     pub game: Option<Game>,
     start: Arc<Game>,
     linger: u32,
+    /// The last step's sounds (none in the lobby).
+    sounds: Vec<Sound>,
 }
 
 impl Online {
     pub fn new(start: Game) -> Online {
-        Online { lobby: Lobby::default(), game: None, start: Arc::new(start), linger: 0 }
+        Online { lobby: Lobby::default(), game: None, start: Arc::new(start), linger: 0, sounds: vec![] }
     }
 }
 
 impl Sim for Online {
     fn step(&mut self, pads: [u8; 2]) {
+        self.sounds.clear();
         match &mut self.game {
             None => {
                 if self.lobby.step(pads) {
@@ -168,6 +192,7 @@ impl Sim for Online {
             }
             Some(g) => {
                 g.frame(pads);
+                self.sounds.extend_from_slice(g.sounds());
                 if let Status::Stopped(_) = g.status {
                     // Something not ported yet: say so for a second, then back to the
                     // lobby.
@@ -185,6 +210,10 @@ impl Sim for Online {
     fn checksum(&self) -> u32 {
         self.game.as_ref().map_or(self.lobby.checksum(), Game::checksum)
     }
+
+    fn sounds(&self) -> &[Sound] {
+        &self.sounds
+    }
 }
 
 #[cfg(test)]
@@ -192,15 +221,26 @@ mod tests {
     use super::*;
     use std::time::{Duration, Instant};
 
-    /// A game that remembers every pair of pads it was played with.
+    /// A game that remembers every pair of pads it was played with, and asks for a
+    /// sound on the frames the two pads' low bits differ.
     #[derive(Clone, Default)]
     struct Toy {
         played: Vec<[u8; 2]>,
+        sounds: Vec<Sound>,
+    }
+
+    fn toy_sounds(pads: [u8; 2]) -> Vec<Sound> {
+        if (pads[0] ^ pads[1]) & 1 != 0 { vec![Sound::Play(pads[1])] } else { vec![] }
     }
 
     impl Sim for Toy {
         fn step(&mut self, pads: [u8; 2]) {
             self.played.push(pads);
+            self.sounds = toy_sounds(pads);
+        }
+
+        fn sounds(&self) -> &[Sound] {
+            &self.sounds
         }
 
         fn checksum(&self) -> u32 {
@@ -270,6 +310,30 @@ mod tests {
         let [h, j] = play(600, 0, 0);
         // The guesses were wrong now and then, and put right.
         assert!(h.rollbacks + j.rollbacks > 0);
+    }
+
+    #[test]
+    fn each_frame_sounds_once_whatever_was_guessed() {
+        let [mut h, mut j] = play(600, 0, 3);
+        let mut cancelled = false;
+        for r in [&mut h, &mut j] {
+            let cues = r.take_cues();
+            // Started minus cancelled, frame by frame, is what the real game asked for.
+            for f in 0..r.confirmed() {
+                let mut net: Vec<Sound> = vec![];
+                for c in cues.iter().filter(|c| c.frame == f) {
+                    if c.cancel {
+                        let i = net.iter().position(|s| *s == c.sound).expect("cancelled something never started");
+                        net.swap_remove(i);
+                    } else {
+                        net.push(c.sound);
+                    }
+                }
+                assert_eq!(net, toy_sounds(r.state().played[f as usize]), "frame {f}");
+            }
+            cancelled |= cues.iter().any(|c| c.cancel);
+        }
+        assert!(cancelled, "no guess ever sounded wrong: not much of a test");
     }
 
     #[test]

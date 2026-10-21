@@ -1229,6 +1229,8 @@ pub struct Engine {
     /// Or one comes in the middle of an actor, right after so many `Random` calls.
     pub vblank_after_draws: Option<u32>,
     pub vdp_events: Vec<VdpEvent>,
+    /// Sounds asked for since the caller last took them (`PlaySound`, `StopSound`).
+    pub sounds: Vec<crate::sound::Sound>,
     /// `vdp_reg_0`.. (the register mirror), `hscroll_buffer` (planes A and B).
     pub vdp_regs: [u8; 0x13],
     pub hscroll: [u16; 0x200],
@@ -1388,6 +1390,7 @@ impl Engine {
             vblank_after_draws: None,
             deferred_tail: 0,
             vdp_events: vec![],
+            sounds: vec![],
             vdp_regs: [0; 0x13],
             hscroll: [0; 0x200],
             repeat_times: (8, 2),
@@ -2755,5 +2758,12 @@ impl Engine {
 impl Default for Engine {
     fn default() -> Self {
         Engine::new()
+    }
+}
+
+impl Engine {
+    /// `PlaySound`: asks for sound `id` (see [`crate::sound`]).
+    pub(crate) fn play_sound(&mut self, id: u8) {
+        self.sounds.push(crate::sound::Sound::Play(id));
     }
 }

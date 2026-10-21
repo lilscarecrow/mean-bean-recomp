@@ -21,6 +21,7 @@ use bean_machine::netmenu::{Action, Input, NetMenu, Screen};
 use bean_machine::netplay::{self, Session, State};
 use bean_machine::overlay::{self, Canvas};
 use bean_machine::rollback::{self, Rollback};
+use bean_machine::sound::Cue;
 use bean_machine::{pad, render, rom};
 use bevy::asset::RenderAssetUsages;
 use bevy::image::ImageSampler;
@@ -57,6 +58,7 @@ struct Front {
     port: u16,
     delay: u8,
     ticks: u32,
+    audio: Audio,
     title: String,
 }
 
@@ -193,6 +195,7 @@ fn setup(mut commands: Commands, mut images: ResMut<Assets<Image>>, settings: Re
         port: settings.port,
         delay: settings.delay,
         ticks: 0,
+        audio: Audio::new(),
         title: TITLE.into(),
     };
     if let Some(action) = start.0.take() {
@@ -252,6 +255,9 @@ fn step(keys: Res<ButtonInput<KeyCode>>, mut front: ResMut<Front>, mut windows: 
                     pads = [0, 0];
                 }
                 play_online(net, pads[0] | pads[1]);
+                if let Some(play) = net.play.as_mut() {
+                    front.audio.cues(&play.take_cues());
+                }
                 net.session.send();
                 set_title(front, &mut windows);
                 return;
@@ -268,6 +274,7 @@ fn step(keys: Res<ButtonInput<KeyCode>>, mut front: ResMut<Front>, mut windows: 
     // This machine's game: played as usual, or running on its own under the menus.
     let local = if front.menu_open { [0, 0] } else { pads };
     play_frame(&mut front.game, &mut front.linger, BOOT_SEED, local);
+    front.audio.frame(front.game.sounds());
     front.game.engine.network_line = true;
     if front.game.engine.network_chosen {
         front.game.engine.network_chosen = false;
@@ -289,6 +296,37 @@ fn play_online(net: &mut Online, mine: u8) {
     }
     if let Some(play) = net.play.as_mut() {
         play.tick(&mut net.session, mine);
+    }
+}
+
+/// Where the game's sounds go (see [`bean_machine::sound`]). No sound driver is ported
+/// yet: with `MBM_SOUND_LOG` set, the requests are printed instead.
+struct Audio {
+    log: bool,
+    /// Frames played offline (to number their cues).
+    frame: u32,
+}
+
+impl Audio {
+    fn new() -> Audio {
+        Audio { log: std::env::var_os("MBM_SOUND_LOG").is_some(), frame: 0 }
+    }
+
+    /// An offline frame's requests: all of them, once.
+    fn frame(&mut self, sounds: &[bean_machine::sound::Sound]) {
+        let frame = self.frame;
+        self.frame += 1;
+        let cues: Vec<Cue> = sounds.iter().map(|&sound| Cue { frame, sound, cancel: false }).collect();
+        self.cues(&cues);
+    }
+
+    /// What to start or cancel (over the network, after rollback has sorted out replays).
+    fn cues(&mut self, cues: &[Cue]) {
+        if self.log {
+            for c in cues {
+                eprintln!("sound: frame {} {}{:?}", c.frame, if c.cancel { "cancel " } else { "" }, c.sound);
+            }
+        }
     }
 }
 

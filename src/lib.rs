@@ -22,6 +22,7 @@ pub mod pad;
 pub mod pair;
 pub mod render;
 pub mod rollback;
+pub mod sound;
 pub mod rng;
 pub mod rom;
 

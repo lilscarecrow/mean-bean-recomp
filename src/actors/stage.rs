@@ -315,6 +315,7 @@ impl Engine {
                         return Ok(Some(r));
                     }
                     // loc_5C24: sound $63; sparkles unless much garbage is waiting.
+                    self.play_sound(0x63);
                     let p1_slot = actor_slot(r.link);
                     let p2_slot = self.player_link(p1_slot);
                     let pending = self.player_mut(p1_slot).pending_garbage.wrapping_add(self.player_mut(p2_slot).pending_garbage);

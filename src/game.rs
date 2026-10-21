@@ -10,6 +10,7 @@ use super::assets::{planes, screen, sprites, AssetSource, Rom, RomAssets, Vram};
 use super::pad::{self, Pad};
 use super::render::{self, Layout};
 use super::rng::Rng;
+use super::sound::Sound;
 
 /// Brings `vram` up to date with what the engine did since the last call: its plane
 /// writes and, in order among them, the flow's art loads and plane lists.
@@ -96,6 +97,8 @@ pub struct Game {
     /// `draw_order`: DrawActors walks the slots forwards and backwards on alternate frames.
     backwards: bool,
     refugee_frame: u8,
+    /// The sounds the last frame asked for.
+    sounds: Vec<Sound>,
     /// CRAM and VSRAM as the last vertical blank left them.
     cram: [u16; 64],
     vsram: [u16; 40],
@@ -137,6 +140,7 @@ impl Game {
             pads: [Pad::default(); 2],
             backwards: false,
             refugee_frame: 0xFF,
+            sounds: vec![],
             cram: [0; 64],
             vsram: [0; 40],
         })
@@ -166,6 +170,7 @@ impl Game {
             pads: [Pad::default(); 2],
             backwards: false,
             refugee_frame: 0xFF,
+            sounds: vec![],
             cram: [0; 64],
             vsram: [0; 40],
         })
@@ -173,6 +178,7 @@ impl Game {
 
     /// One video frame with the buttons held on each pad (`mbm::pad` bits).
     pub fn frame(&mut self, buttons: [u8; 2]) {
+        self.sounds.clear();
         if self.status != Status::Playing {
             return;
         }
@@ -192,6 +198,7 @@ impl Game {
         if let Err(Unported(what)) = self.engine.logic(&inputs) {
             self.status = Status::Stopped(what.to_string());
         }
+        self.sounds = std::mem::take(&mut self.engine.sounds);
         self.engine.match_over = false;
     }
 
@@ -236,6 +243,12 @@ impl Game {
             run(&mut g, 0)?;
         }
         Ok(g)
+    }
+
+    /// The sounds the last frame asked for (the front end plays them; see
+    /// [`crate::sound`]).
+    pub fn sounds(&self) -> &[Sound] {
+        &self.sounds
     }
 
     /// Where the main menu's cursor is, while the menu takes input.

@@ -247,7 +247,7 @@ impl Engine {
         }
     }
 
-    /// `loc_7C2C` / `loc_7BF0`: a pause, then Robotnik's line (the sound isn't ported).
+    /// `loc_7C2C` / `loc_7BF0`: a pause, then Robotnik's line.
     pub(super) fn run_voice(&mut self, mut v: RobotnikVoice) -> Option<RobotnikVoice> {
         if !v.started {
             v.started = true;
@@ -256,7 +256,11 @@ impl Engine {
         }
         v.wait = v.wait.wrapping_sub(1);
         // bpl: past 0 the sample plays and the actor ends.
-        (v.wait & 0x8000 == 0).then_some(v)
+        if v.wait & 0x8000 != 0 {
+            self.play_sound(v.line);
+            return None;
+        }
+        Some(v)
     }
 
     /// `sub_7078`: four stars from the winner's field (left edge `x0`).
