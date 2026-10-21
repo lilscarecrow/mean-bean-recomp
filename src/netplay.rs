@@ -245,12 +245,12 @@ impl Session {
         }
     }
 
-    /// Tells the peer we're leaving.
-    pub fn leave(&mut self) {
+    /// Tells the peer we're leaving, and closes with `why`.
+    pub fn leave(&mut self, why: &str) {
         if let (Some(peer), State::Playing | State::Connecting) = (self.peer, &self.state) {
             self.send_to(&header(BYE), peer);
         }
-        self.close("left");
+        self.close(why);
     }
 
     fn close(&mut self, why: &str) {
@@ -364,6 +364,14 @@ fn resolve(addr: &str) -> io::Result<SocketAddr> {
         .or_else(|| with_port(&format!("{addr}:{DEFAULT_PORT}")))
         .or_else(|| with_port(&format!("[{addr}]:{DEFAULT_PORT}")))
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, format!("can't find {addr}")))
+}
+
+/// This machine's address on its network (the one a route to the internet would
+/// use), to tell the other player. Sends nothing.
+pub fn local_address() -> Option<std::net::IpAddr> {
+    let s = UdpSocket::bind("0.0.0.0:0").ok()?;
+    s.connect("8.8.8.8:53").ok()?;
+    Some(s.local_addr().ok()?.ip()).filter(|ip| !ip.is_unspecified())
 }
 
 /// FNV-1a: tells two ROMs (or two games' states) apart, nothing more.
@@ -493,7 +501,7 @@ mod tests {
             }
             std::thread::sleep(Duration::from_millis(1));
         }
-        join.leave();
+        join.leave("left");
         for _ in 0..200 {
             host.receive();
             if matches!(host.state(), State::Closed(_)) {

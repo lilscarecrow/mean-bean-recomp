@@ -5,20 +5,25 @@
 //! Usage: `bean-machine [path to the ROM]` (or set `MBM_ROM`). Arrows move, Z/X/C are
 //! A/B/C (turn), Enter is Start. Esc quits.
 //!
-//! Over the network (see [`bean_machine::netplay`]):
-//!   `bean-machine [ROM] --host [PORT] [--delay FRAMES]` waits for a player (port 7845
-//!   unless given) and plays as player 1;
-//!   `bean-machine [ROM] --join IP[:PORT]` plays as player 2 on that host.
-//! Each side plays with either set of keys; the game starts from power-on once both are
-//! in.
+//! Not in the ROM: NETWORK on the main menu plays 1P vs 2P with someone on another
+//! machine (see [`bean_machine::netplay`] and [`bean_machine::netmenu`]). One player
+//! hosts, the other types the host's address and connects; both press START in the lobby
+//! and the match starts. Each side plays with either set of keys. From the command line:
+//!   `bean-machine [ROM] --host [PORT]` hosts straight away (port 7845 unless given);
+//!   `bean-machine [ROM] --join IP[:PORT]` joins straight away;
+//!   `--delay FRAMES` sets the host's input delay (3 unless given).
 
 use std::path::PathBuf;
 
 use bean_machine::game::{Game, Status};
+use bean_machine::netmenu::{Action, Input, Lobby, NetMenu, Screen};
 use bean_machine::netplay::{self, Session, State};
+use bean_machine::overlay::{self, Canvas};
 use bean_machine::{pad, render, rom};
 use bevy::asset::RenderAssetUsages;
 use bevy::image::ImageSampler;
+use bevy::input::ButtonState;
+use bevy::input::keyboard::KeyboardInput;
 use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 
@@ -26,22 +31,48 @@ const SCALE: f32 = 3.0;
 /// The random seed as the boot code leaves it (the game draws from it every frame, so
 /// what follows depends on when buttons are pressed, as on the console).
 const BOOT_SEED: u32 = 0x7FE7_B46A;
+const TITLE: &str = "Dr. Robotnik's Mean Bean Machine";
+
+/// Where the NETWORK line's label goes on the main menu: just right of the bean cursor
+/// on its fifth line (the cursor's sprite is at x $C0, y $D0 + line * $18).
+const NETWORK_LABEL: (i32, i32) = (0xC0 - 0x80 + 24, 0xD0 + 4 * 0x18 - 0x80 - 6);
 
 #[derive(Resource)]
 struct Front {
+    /// The game on this machine (under the network menus, and again afterwards).
     game: Game,
     screen: Handle<Image>,
     /// Frames shown since the game reached something not ported yet.
     linger: u32,
-    /// The seed the game powers on with (the host's, over the network).
-    seed: u32,
-    /// Playing over the network: the connection and the next frame to play.
-    net: Option<Session>,
-    frame: u32,
+    menu: NetMenu,
+    menu_open: bool,
+    /// The menus opened this frame: the key that opened them isn't for them.
+    menu_fresh: bool,
+    net: Option<Online>,
+    /// Keys still held from the menus: the pads read nothing until they're let go.
+    mute: bool,
+    rom_hash: u64,
+    port: u16,
+    delay: u8,
+    ticks: u32,
     title: String,
 }
 
-const TITLE: &str = "Dr. Robotnik's Mean Bean Machine";
+/// A connection, and once it's up, the lobby and then the match.
+struct Online {
+    session: Session,
+    /// The next frame to play (the lobby's frames count too).
+    frame: u32,
+    lobby: Lobby,
+    game: Option<Game>,
+    linger: u32,
+}
+
+impl Online {
+    fn new(session: Session) -> Online {
+        Online { session, frame: 0, lobby: Lobby::default(), game: None, linger: 0 }
+    }
+}
 
 /// What the command line asks for.
 #[derive(Default)]
@@ -88,6 +119,10 @@ fn fail(e: impl std::fmt::Display) -> ! {
     std::process::exit(2);
 }
 
+/// Hosting or joining from the command line.
+#[derive(Resource)]
+struct Start(Option<Action>);
+
 fn main() {
     let args = args().unwrap_or_else(|e| fail(e));
     let Some(path) = rom_path(&args) else {
@@ -96,11 +131,9 @@ fn main() {
     if let Err(e) = rom::install_from(&path) {
         fail(e);
     }
-    let rom_hash = netplay::hash(rom::get().unwrap());
-    let delay = args.delay.unwrap_or(netplay::DEFAULT_DELAY);
-    let net = match (args.host, &args.join) {
-        (Some(port), _) => Some(Session::host(port, rom_hash, BOOT_SEED, delay).unwrap_or_else(|e| fail(format!("can't host on port {port}: {e}")))),
-        (_, Some(addr)) => Some(Session::join(addr, rom_hash).unwrap_or_else(|e| fail(format!("can't join {addr}: {e}")))),
+    let start = match (args.host, args.join) {
+        (Some(_), _) => Some(Action::Host),
+        (_, Some(addr)) => Some(Action::Join(addr)),
         _ => None,
     };
     App::new()
@@ -114,18 +147,21 @@ fn main() {
         }))
         .insert_resource(ClearColor(Color::BLACK))
         .insert_resource(Time::<Fixed>::from_hz(60.0))
-        .insert_resource(Pending(net))
+        .insert_resource(Settings { port: args.host.unwrap_or(netplay::DEFAULT_PORT), delay: args.delay.unwrap_or(netplay::DEFAULT_DELAY) })
+        .insert_resource(Start(start))
         .add_systems(Startup, setup)
         .add_systems(FixedUpdate, step)
-        .add_systems(Update, (show, quit))
+        .add_systems(Update, (ui, show).chain())
         .run();
 }
 
-/// The connection, until `setup` moves it into [`Front`].
 #[derive(Resource)]
-struct Pending(Option<Session>);
+struct Settings {
+    port: u16,
+    delay: u8,
+}
 
-fn setup(mut commands: Commands, mut images: ResMut<Assets<Image>>, mut pending: ResMut<Pending>) {
+fn setup(mut commands: Commands, mut images: ResMut<Assets<Image>>, settings: Res<Settings>, mut start: ResMut<Start>) {
     let mut image = Image::new(
         Extent3d { width: render::WIDTH as u32, height: render::HEIGHT as u32, depth_or_array_layers: 1 },
         TextureDimension::D2,
@@ -141,9 +177,29 @@ fn setup(mut commands: Commands, mut images: ResMut<Assets<Image>>, mut pending:
         custom_size: Some(Vec2::new(render::WIDTH as f32 * SCALE, render::HEIGHT as f32 * SCALE)),
         ..default()
     });
-    let game = Game::boot(BOOT_SEED).expect("starting the game");
-    let net = pending.0.take();
-    commands.insert_resource(Front { game, screen, linger: 0, seed: BOOT_SEED, net, frame: 0, title: TITLE.into() });
+    let mut front = Front {
+        game: Game::boot(BOOT_SEED).expect("starting the game"),
+        screen,
+        linger: 0,
+        menu: NetMenu::new(),
+        menu_open: false,
+        menu_fresh: false,
+        net: None,
+        mute: false,
+        rom_hash: netplay::hash(rom::get().unwrap()),
+        port: settings.port,
+        delay: settings.delay,
+        ticks: 0,
+        title: TITLE.into(),
+    };
+    if let Some(action) = start.0.take() {
+        front.menu_open = true;
+        if let Action::Join(addr) = &action {
+            front.menu.address = addr.clone();
+        }
+        act(&mut front, action);
+    }
+    commands.insert_resource(front);
 }
 
 /// The keyboard as player 1's pad (arrows, Z/X/C, Enter).
@@ -175,35 +231,88 @@ fn buttons(keys: &ButtonInput<KeyCode>, map: &[(KeyCode, u8)]) -> u8 {
 }
 
 fn step(keys: Res<ButtonInput<KeyCode>>, mut front: ResMut<Front>, mut windows: Query<&mut Window>) {
-    let pads = [buttons(&keys, &P1_KEYS), buttons(&keys, &P2_KEYS)];
     let front = &mut *front;
-    let Some(net) = front.net.as_mut() else {
-        play_frame(&mut front.game, &mut front.linger, front.seed, pads);
-        set_title(front, &mut windows);
-        return;
-    };
-    net.receive();
-    if *net.state() == State::Playing && front.frame == 0 && front.seed != net.seed() {
-        // (joined: power on with the host's seed)
-        front.seed = net.seed();
-        front.game = Game::boot(front.seed).expect("starting the game");
+    front.ticks += 1;
+    let mut pads = [buttons(&keys, &P1_KEYS), buttons(&keys, &P2_KEYS)];
+    if front.mute {
+        front.mute = pads != [0, 0];
+        pads = [0, 0];
     }
-    // Either set of keys is our pad. Play the next frame once the other side's buttons
-    // for it are here, and a second one when they're ahead of us.
-    let mine = pads[0] | pads[1];
-    for _ in 0..2 {
-        let Some(both) = net.step(front.frame, mine) else { break };
-        front.frame += 1;
-        play_frame(&mut front.game, &mut front.linger, front.seed, both);
-        if front.frame.is_multiple_of(netplay::CHECK_EVERY) {
-            net.check(front.frame, front.game.checksum());
+    if let Some(net) = front.net.as_mut() {
+        net.session.receive();
+        match net.session.state().clone() {
+            State::Playing => {
+                if front.menu_open {
+                    // (just connected: the keys that got us here don't count in the lobby)
+                    front.menu_open = false;
+                    front.mute = true;
+                    pads = [0, 0];
+                }
+                play_online(net, pads[0] | pads[1]);
+                net.session.send();
+                set_title(front, &mut windows);
+                return;
+            }
+            State::Closed(why) => {
+                front.net = None;
+                front.menu_open = true;
+                front.mute = true;
+                front.menu.show(Screen::Notice(why));
+            }
+            State::Waiting | State::Connecting => net.session.send(),
         }
-        if !net.behind(front.frame) {
+    }
+    // This machine's game: played as usual, or running on its own under the menus.
+    let local = if front.menu_open { [0, 0] } else { pads };
+    play_frame(&mut front.game, &mut front.linger, BOOT_SEED, local);
+    front.game.engine.network_line = true;
+    if front.game.engine.network_chosen {
+        front.game.engine.network_chosen = false;
+        front.menu.show(Screen::Choose);
+        front.menu_open = true;
+        front.menu_fresh = true;
+    }
+    set_title(front, &mut windows);
+}
+
+/// Plays the next frame over the network once the other side's buttons for it are
+/// here, and a second one when they're ahead of us: the lobby until both are ready,
+/// then the match.
+fn play_online(net: &mut Online, mine: u8) {
+    for _ in 0..2 {
+        let Some(both) = net.session.step(net.frame, mine) else { break };
+        net.frame += 1;
+        match net.game.as_mut() {
+            None => {
+                if net.lobby.step(both) {
+                    match Game::versus(net.session.seed()) {
+                        Ok(g) => net.game = Some(g),
+                        Err(e) => return net.session.leave(&e),
+                    }
+                }
+            }
+            Some(g) => {
+                g.frame(both);
+                if let Status::Stopped(_) = g.status {
+                    // Something not ported yet: say so for a second, then back to the
+                    // lobby (on both sides: they stop on the same frame).
+                    net.linger += 1;
+                    if net.linger > 60 {
+                        net.game = None;
+                        net.lobby = Lobby::default();
+                        net.linger = 0;
+                    }
+                }
+            }
+        }
+        if net.frame.is_multiple_of(netplay::CHECK_EVERY) {
+            let sum = net.game.as_ref().map_or(net.lobby.checksum(), Game::checksum);
+            net.session.check(net.frame, sum);
+        }
+        if !net.session.behind(net.frame) {
             break;
         }
     }
-    net.send();
-    set_title(front, &mut windows);
 }
 
 /// One frame of the game. When the flow reaches something not ported yet, it says so
@@ -221,42 +330,143 @@ fn play_frame(game: &mut Game, linger: &mut u32, seed: u32, pads: [u8; 2]) {
     }
 }
 
-/// The window title: the game's, the connection's state, and anything not ported yet.
-fn set_title(front: &mut Front, windows: &mut Query<&mut Window>) {
-    let mut title = TITLE.to_string();
-    if let Some(net) = &front.net {
-        let port = net.port().map(|p| p.to_string()).unwrap_or_default();
-        let peer = net.peer().map(|p| p.to_string()).unwrap_or_default();
-        title = match net.state() {
-            State::Waiting => format!("{title} (hosting on port {port}: waiting for player 2)"),
-            State::Connecting => format!("{title} (joining {peer}...)"),
-            State::Playing if net.side() == 0 => format!("{title} (player 1, {peer} is player 2)"),
-            State::Playing => format!("{title} (player 2, hosted by {peer})"),
-            State::Closed(why) => format!("{title} (disconnected: {why})"),
-        };
-    }
-    if let Status::Stopped(why) = &front.game.status {
-        title = format!("{title} ({why}: not ported yet)");
-    }
-    if title != front.title {
-        if let Ok(mut w) = windows.single_mut() {
-            w.title = title.clone();
+/// Does what the network menus ask.
+fn act(front: &mut Front, action: Action) {
+    match action {
+        Action::Host => match Session::host(front.port, front.rom_hash, random_seed(), front.delay) {
+            Ok(s) => {
+                let port = s.port().unwrap_or(front.port);
+                let addresses = netplay::local_address().map(|a| a.to_string()).into_iter().collect();
+                front.menu.show(Screen::Host { port, addresses });
+                front.net = Some(Online::new(s));
+            }
+            Err(e) => front.menu.show(Screen::Notice(format!("can't host on port {}: {e}", front.port))),
+        },
+        Action::Join(addr) => match Session::join(&addr, front.rom_hash) {
+            Ok(s) => {
+                front.menu.show(Screen::Connecting);
+                front.net = Some(Online::new(s));
+            }
+            Err(e) => front.menu.show(Screen::Notice(format!("can't join {addr}: {e}"))),
+        },
+        Action::Cancel => {
+            if let Some(mut net) = front.net.take() {
+                net.session.leave("cancelled");
+            }
         }
-        front.title = title;
+        Action::Close => {
+            front.menu_open = false;
+            front.mute = true;
+        }
+    }
+}
+
+/// A seed for a network game (the host's choice; the joiner gets it when connecting).
+fn random_seed() -> u32 {
+    let t = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+    (t.as_nanos() as u32) ^ std::process::id().rotate_left(16) | 1
+}
+
+/// Keys and clicks for the menus (and Esc: back, leave the network game, or quit).
+fn ui(
+    mut typed: MessageReader<KeyboardInput>,
+    mouse: Res<ButtonInput<MouseButton>>,
+    windows: Query<&Window>,
+    mut front: ResMut<Front>,
+    mut exit: MessageWriter<AppExit>,
+) {
+    let mut inputs = vec![];
+    for ev in typed.read().filter(|ev| ev.state == ButtonState::Pressed) {
+        let input = match ev.key_code {
+            KeyCode::ArrowUp => Input::Up,
+            KeyCode::ArrowDown | KeyCode::Tab => Input::Down,
+            KeyCode::Enter | KeyCode::NumpadEnter => Input::Confirm,
+            KeyCode::Escape => Input::Back,
+            KeyCode::Backspace => Input::Erase,
+            _ => {
+                inputs.extend(ev.text.iter().flat_map(|t| t.chars()).filter(|c| !c.is_control()).map(Input::Char));
+                continue;
+            }
+        };
+        inputs.push(input);
+    }
+    if mouse.just_pressed(MouseButton::Left)
+        && let Ok(w) = windows.single()
+        && let Some(at) = w.cursor_position()
+    {
+        // The picture sits in the middle of the window, SCALE times its size.
+        let x = (at.x - (w.width() - render::WIDTH as f32 * SCALE) / 2.0) / SCALE;
+        let y = (at.y - (w.height() - render::HEIGHT as f32 * SCALE) / 2.0) / SCALE;
+        inputs.push(Input::Click(x.floor() as i32, y.floor() as i32));
+    }
+    let front = &mut *front;
+    if std::mem::take(&mut front.menu_fresh) {
+        return;
+    }
+    for input in inputs {
+        let playing = front.net.as_ref().is_some_and(|n| *n.session.state() == State::Playing);
+        if playing {
+            if input == Input::Back
+                && let Some(net) = front.net.as_mut()
+            {
+                net.session.leave("you left the game");
+            }
+        } else if front.menu_open {
+            if let Some(action) = front.menu.input(input) {
+                act(front, action);
+            }
+        } else if input == Input::Back {
+            exit.write(AppExit::Success);
+        }
     }
 }
 
 fn show(front: Res<Front>, mut images: ResMut<Assets<Image>>) {
+    let online = front.net.as_ref().filter(|n| *n.session.state() == State::Playing);
+    let mut picture = match online.and_then(|n| n.game.as_ref()) {
+        Some(g) => g.picture(),
+        None => front.game.picture(),
+    };
+    if let Some(net) = online {
+        if net.game.is_none() {
+            let peer = net.session.peer().map(|p| p.ip().to_string()).unwrap_or_default();
+            net.lobby.draw(&mut picture, net.session.side(), &peer);
+        }
+    } else if front.menu_open {
+        front.menu.draw(&mut picture, front.ticks);
+    } else if let Some(line) = front.game.main_menu_line() {
+        let color = if line == bean_machine::actors::NETWORK_LINE { overlay::YELLOW } else { overlay::WHITE };
+        Canvas(&mut picture).text(NETWORK_LABEL.0, NETWORK_LABEL.1, "NETWORK", color, 2);
+    }
     if let Some(mut image) = images.get_mut(&front.screen) {
-        image.data = Some(front.game.picture());
+        image.data = Some(picture);
     }
 }
 
-fn quit(keys: Res<ButtonInput<KeyCode>>, mut front: ResMut<Front>, mut exit: MessageWriter<AppExit>) {
-    if keys.just_pressed(KeyCode::Escape) {
-        if let Some(net) = front.net.as_mut() {
-            net.leave();
+/// The window title: the game's, who we're playing, and anything not ported yet.
+fn set_title(front: &mut Front, windows: &mut Query<&mut Window>) {
+    let online = front.net.as_ref().filter(|n| *n.session.state() == State::Playing);
+    let mut title = TITLE.to_string();
+    let mut game = &front.game;
+    if let Some(net) = online {
+        let peer = net.session.peer().map(|p| p.to_string()).unwrap_or_default();
+        title = format!("{title} (network: player {} with {peer})", net.session.side() + 1);
+        match &net.game {
+            Some(g) => game = g,
+            None => return set(front, windows, title),
         }
-        exit.write(AppExit::Success);
+    }
+    if let Status::Stopped(why) = &game.status {
+        title = format!("{title} ({why}: not ported yet)");
+    }
+    set(front, windows, title);
+
+    fn set(front: &mut Front, windows: &mut Query<&mut Window>, title: String) {
+        if title != front.title {
+            if let Ok(mut w) = windows.single_mut() {
+                w.title = title.clone();
+            }
+            front.title = title;
+        }
     }
 }

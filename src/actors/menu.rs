@@ -4,6 +4,10 @@
 //! second board sliding in with Start / Continue (lists $10/$11). A choice blinks the
 //! cursor for 16 frames, then sets `level_mode` and `bytecode_flag` for
 //! `BC_GameStart` (scenario: 0 Start, 4 Continue to the password screen).
+//!
+//! Not in the ROM: with `network_line` on, the cursor goes one line further, to
+//! [`NETWORK_LINE`] (no plane list highlights it: the front end draws it), and START
+//! there sets `network_chosen` and leaves the menu as it is.
 
 use super::*;
 use crate::rom;
@@ -41,6 +45,8 @@ pub struct MenuClouds {
 
 pub const MENU_CLOUDS_CODE: u32 = 0xBDA4;
 pub const MAIN_MENU_MAPPINGS: u8 = 0x40;
+/// The extra line `network_line` adds (after OPTIONS, line 3).
+pub const NETWORK_LINE: u16 = 4;
 
 const MAIN_MENU_MAP: u32 = 0x6C7C2;
 const SCENARIO_MENU_MAP: u32 = 0x6C872;
@@ -109,7 +115,9 @@ impl Engine {
             1 => {
                 m.y = m.line * 0x18 + 0xD0;
                 m.anim.step_with(&mut || self.random());
-                if press & 0xF0 != 0 {
+                if press & 0xF0 != 0 && m.line == NETWORK_LINE {
+                    self.network_chosen = true;
+                } else if press & 0xF0 != 0 {
                     // sub_BCC2: 1P vs 2P needs a second pad (there always is one here).
                     self.last_mode = m.line as u8;
                     m.count = 0;
@@ -120,10 +128,13 @@ impl Engine {
                     }
                     self.queue_panel(PanelCommand::List(0x0C + m.line));
                 } else if press & 2 != 0 {
-                    if m.line < 3 {
+                    let last = if self.network_line { NETWORK_LINE } else { 3 };
+                    if m.line < last {
                         m.line += 1;
                     }
-                    self.queue_panel(PanelCommand::List(0x0C + m.line));
+                    if m.line < NETWORK_LINE {
+                        self.queue_panel(PanelCommand::List(0x0C + m.line));
+                    }
                 }
             }
             2 | 6 => {

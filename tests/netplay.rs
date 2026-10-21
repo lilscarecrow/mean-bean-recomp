@@ -68,3 +68,61 @@ fn two_games_over_the_network_stay_in_step() {
     assert_eq!(a.checksum(), b.checksum());
     assert!(a.picture() == b.picture(), "the two pictures differ");
 }
+
+/// Taps START from power-on until the main menu takes input.
+fn to_main_menu(g: &mut Game) {
+    for t in 0..6000 {
+        if g.main_menu_line().is_some() {
+            return;
+        }
+        g.frame([if t % 8 < 2 { pad::START } else { 0 }, 0]);
+    }
+    panic!("never reached the main menu");
+}
+
+fn tap(g: &mut Game, b: u8) {
+    g.frame([b, 0]);
+    g.frame([0, 0]);
+}
+
+#[test]
+fn the_network_line_is_only_there_when_asked_for() {
+    if !support::install_rom() {
+        return;
+    }
+    // As the ROM has it: the cursor stops at OPTIONS.
+    let mut g = Game::boot(0x7FE7_B46A).unwrap();
+    to_main_menu(&mut g);
+    g.frame([0, 0]);
+    for _ in 0..6 {
+        tap(&mut g, pad::DOWN);
+    }
+    assert_eq!(g.main_menu_line(), Some(3));
+    // With the extra line: one further, and START there leaves the menu up.
+    let mut g = Game::boot(0x7FE7_B46A).unwrap();
+    g.engine.network_line = true;
+    to_main_menu(&mut g);
+    g.frame([0, 0]);
+    for _ in 0..6 {
+        tap(&mut g, pad::DOWN);
+    }
+    assert_eq!(g.main_menu_line(), Some(bean_machine::actors::NETWORK_LINE));
+    tap(&mut g, pad::START);
+    assert!(g.engine.network_chosen);
+    assert_eq!(g.main_menu_line(), Some(bean_machine::actors::NETWORK_LINE));
+    // And back up to the ROM's lines.
+    tap(&mut g, pad::UP);
+    assert_eq!(g.main_menu_line(), Some(3));
+}
+
+#[test]
+fn versus_starts_the_same_way_every_time() {
+    if !support::install_rom() {
+        return;
+    }
+    let a = Game::versus(0x1234_5678).unwrap();
+    let b = Game::versus(0x1234_5678).unwrap();
+    assert_eq!(a.engine.level_mode, 1, "not in 1P vs 2P");
+    assert_eq!(a.checksum(), b.checksum());
+    assert!(a.picture() == b.picture());
+}

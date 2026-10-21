@@ -1299,6 +1299,11 @@ pub struct Engine {
     /// `byte_FF0105` (the main menu's last mode) and the options (`$FFFCA4..`).
     pub last_mode: u8,
     pub options: [u8; 9],
+    /// Not in the ROM: the main menu gets a fifth line, NETWORK, below OPTIONS (the
+    /// front end draws its label), and choosing it sets `network_chosen` instead of
+    /// leaving the menu. Off unless the front end turns it on.
+    pub network_line: bool,
+    pub network_chosen: bool,
     /// `plane_a_buffer` ($700 words) and `use_plane_a_buffer`: while set, the vertical
     /// blank copies the buffer to plane A ($C000).
     pub plane_a_buffer: Vec<u16>,
@@ -1412,6 +1417,8 @@ impl Engine {
             hblank_lines: 0,
             last_mode: 0,
             options: DEFAULT_OPTIONS,
+            network_line: false,
+            network_chosen: false,
             plane_a_buffer: vec![0; 0x700],
             use_plane_a_buffer: false,
             misc_buffer: vec![],

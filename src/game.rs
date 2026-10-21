@@ -7,7 +7,7 @@
 
 use super::actors::{Actor, Engine, Inputs, Unported, VdpOp, BC_LEVEL, SLOTS};
 use super::assets::{planes, screen, sprites, AssetSource, Rom, RomAssets, Vram};
-use super::pad::Pad;
+use super::pad::{self, Pad};
 use super::render::{self, Layout};
 use super::rng::Rng;
 
@@ -192,6 +192,57 @@ impl Game {
             self.status = Status::Stopped(what.to_string());
         }
         self.engine.match_over = false;
+    }
+
+    /// Not in the ROM: powers on from `seed` and plays through to 1P vs 2P as a player
+    /// would (START until the main menu is up, the cursor to its second line, START),
+    /// showing nothing. Two machines that do this from the same seed end up in the same
+    /// state, so a network match starts from here: each player picking a level.
+    pub fn versus(seed: u32) -> Result<Game, String> {
+        const LIMIT: u32 = 6000;
+        let mut g = Game::boot(seed)?;
+        let mut frames = 0;
+        let mut run = |g: &mut Game, buttons: u8| -> Result<(), String> {
+            g.frame([buttons, 0]);
+            frames += 1;
+            match &g.status {
+                Status::Stopped(why) => Err(format!("starting 1P vs 2P: {why}")),
+                _ if frames > LIMIT => Err("starting 1P vs 2P: never got there".into()),
+                _ => Ok(()),
+            }
+        };
+        let menu_up = |g: &Game| g.engine.slots.iter().flatten().any(|a| matches!(a, Actor::MainMenu(_)));
+        // START, tapped, through the logo and the title.
+        let mut t = 0;
+        while !menu_up(&g) {
+            run(&mut g, if t % 8 < 2 { pad::START } else { 0 })?;
+            t += 1;
+        }
+        run(&mut g, 0)?;
+        loop {
+            match g.main_menu_line() {
+                Some(1) => break,
+                Some(line) => {
+                    run(&mut g, if line < 1 { pad::DOWN } else { pad::UP })?;
+                    run(&mut g, 0)?;
+                }
+                None => run(&mut g, 0)?,
+            }
+        }
+        run(&mut g, pad::START)?;
+        // The cursor blinks, then the menu hands over to the game flow.
+        while menu_up(&g) {
+            run(&mut g, 0)?;
+        }
+        Ok(g)
+    }
+
+    /// Where the main menu's cursor is, while the menu takes input.
+    pub fn main_menu_line(&self) -> Option<u16> {
+        self.engine.slots.iter().flatten().find_map(|a| match a {
+            Actor::MainMenu(m) if m.phase == 1 => Some(m.line),
+            _ => None,
+        })
     }
 
     /// A cheap fingerprint of where the game is (the random seed, how often it was drawn
