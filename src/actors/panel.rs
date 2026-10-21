@@ -43,6 +43,10 @@ pub enum PanelCommand {
     TextBox { len: u8, at: u16 },
     /// $92: the game over countdown's digit (`byte_66C9A`, 5 x 7 tiles).
     Countdown(u8),
+    /// $83 (`SpecPlane83`): a frame of a VS level selector's box ($FF: gone).
+    VsBox { player: u8, frame: u8 },
+    /// $88 (`SpecPlane88`): a level in it, highlighted with $8000.
+    VsLevel { player: u8, word: u16 },
 }
 
 /// `SpecPlane92`'s digits (5 x 7 words each, less $1E00) and where they go.
@@ -121,6 +125,8 @@ impl Engine {
                     self.small_text(0xC22A, 0xA500, STR_DR_R, 4);
                 }
                 PanelCommand::Wipe { player, frame } => self.draw_wipe(player, frame),
+                PanelCommand::VsBox { player, frame } => self.draw_vs_box(player, frame),
+                PanelCommand::VsLevel { player, word } => self.draw_vs_level(player, word),
                 PanelCommand::IntroBox { kind, size, at } => self.draw_intro_box(kind, size, at),
                 PanelCommand::List(list) => {
                     let row = self.plane_row();

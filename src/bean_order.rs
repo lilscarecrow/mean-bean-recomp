@@ -66,10 +66,15 @@ pub struct BeanOrders {
 
 /// `GenPuyoOrder`. Consumes 256 RNG calls (504 in the split mode).
 pub fn gen_bean_orders(rng: &mut Rng, level: u8, level_mode: u8) -> BeanOrders {
+    gen_bean_orders_with(&mut || rng.next(), level, level_mode)
+}
+
+/// `GenPuyoOrder`, drawing from `random` (`Random`).
+pub fn gen_bean_orders_with(random: &mut dyn FnMut() -> u16, level: u8, level_mode: u8) -> BeanOrders {
     let count = color_count(level, level_mode);
     let mut p1: [BeanColor; ORDER_LEN] = std::array::from_fn(|i| COLOR_CYCLE[i % count]);
     for i in (0..ORDER_LEN).rev() {
-        let j = (rng.next() & 0xFF) as usize;
+        let j = (random() & 0xFF) as usize;
         p1.swap(i, j);
     }
 
@@ -81,7 +86,7 @@ pub fn gen_bean_orders(rng: &mut Rng, level: u8, level_mode: u8) -> BeanOrders {
             *bean = COLOR_CYCLE[i % COLOR_CYCLE.len()];
         }
         for i in (0..tail.len()).rev() {
-            let j = rng.below(tail.len() as u16) as usize;
+            let j = ((u32::from(random()) * tail.len() as u32) >> 16) as usize;
             tail.swap(i, j);
         }
     }

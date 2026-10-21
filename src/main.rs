@@ -80,29 +80,39 @@ fn setup(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
     commands.insert_resource(Front { game, screen, linger: 0 });
 }
 
-/// The keyboard as player 1's pad.
-fn buttons(keys: &ButtonInput<KeyCode>) -> u8 {
-    [
-        (KeyCode::ArrowUp, pad::UP),
-        (KeyCode::ArrowDown, pad::DOWN),
-        (KeyCode::ArrowLeft, pad::LEFT),
-        (KeyCode::ArrowRight, pad::RIGHT),
-        (KeyCode::KeyX, pad::B),
-        (KeyCode::KeyC, pad::C),
-        (KeyCode::KeyZ, pad::A),
-        (KeyCode::Enter, pad::START),
-    ]
-    .into_iter()
-    .filter(|(k, _)| keys.pressed(*k))
-    .fold(0, |acc, (_, b)| acc | b)
+/// The keyboard as player 1's pad (arrows, Z/X/C, Enter).
+const P1_KEYS: [(KeyCode, u8); 8] = [
+    (KeyCode::ArrowUp, pad::UP),
+    (KeyCode::ArrowDown, pad::DOWN),
+    (KeyCode::ArrowLeft, pad::LEFT),
+    (KeyCode::ArrowRight, pad::RIGHT),
+    (KeyCode::KeyX, pad::B),
+    (KeyCode::KeyC, pad::C),
+    (KeyCode::KeyZ, pad::A),
+    (KeyCode::Enter, pad::START),
+];
+
+/// And player 2's (WASD, J/K/L, Space), for 1P vs 2P.
+const P2_KEYS: [(KeyCode, u8); 8] = [
+    (KeyCode::KeyW, pad::UP),
+    (KeyCode::KeyS, pad::DOWN),
+    (KeyCode::KeyA, pad::LEFT),
+    (KeyCode::KeyD, pad::RIGHT),
+    (KeyCode::KeyK, pad::B),
+    (KeyCode::KeyL, pad::C),
+    (KeyCode::KeyJ, pad::A),
+    (KeyCode::Space, pad::START),
+];
+
+fn buttons(keys: &ButtonInput<KeyCode>, map: &[(KeyCode, u8)]) -> u8 {
+    map.iter().filter(|(k, _)| keys.pressed(*k)).fold(0, |acc, (_, b)| acc | b)
 }
 
 fn step(keys: Res<ButtonInput<KeyCode>>, mut front: ResMut<Front>, mut windows: Query<&mut Window>) {
-    let p1 = buttons(&keys);
-    front.game.frame([p1, 0]);
+    front.game.frame([buttons(&keys, &P1_KEYS), buttons(&keys, &P2_KEYS)]);
     if let Status::Stopped(why) = front.game.status.clone() {
-        // The flow reached something not ported yet (1P vs 2P, exercise mode, the
-        // attract mode's intro): say so for a second, then power on again.
+        // The flow reached something not ported yet (exercise mode): say so for a
+        // second, then power on again.
         front.linger += 1;
         if front.linger == 1 {
             if let Ok(mut w) = windows.single_mut() {

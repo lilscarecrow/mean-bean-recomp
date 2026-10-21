@@ -148,6 +148,7 @@ pub fn load(ram: &Ram, slot: usize, tag: u8) -> Option<Actor> {
     ]
     .into_iter()
     .chain(LessonState::ALL.map(PlayerState::Lesson))
+    .chain(VsState::ALL.map(PlayerState::Vs))
     .find(|s| s.code() == code);
     if let Some(state) = player_state {
         return Some(Actor::Player(Player {
@@ -389,8 +390,8 @@ fn load_stage(ram: &Ram, a: u32, code: u32) -> Option<Actor> {
             speed: ram.u16(a + 0x28),
             steps: ram.u16(a + 0x2A),
         }),
-        0x7104 | 0x710E | 0x7114 | 0x7132 | 0x714E | 0x7152 => Actor::Star(Star {
-            state: [StarState::Init, StarState::Wait, StarState::Delay, StarState::Rise, StarState::Pause, StarState::Burst]
+        0x7104 | 0x710E | 0x7114 | 0x7132 | 0x714E | 0x7152 | 0x7262 => Actor::Star(Star {
+            state: [StarState::Init, StarState::Wait, StarState::Delay, StarState::Rise, StarState::Pause, StarState::Burst, StarState::VsWait]
                 .into_iter()
                 .find(|s| s.code() == code)
                 .unwrap(),
@@ -769,6 +770,112 @@ fn load_stage(ram: &Ram, a: u32, code: u32) -> Option<Actor> {
             step_b: ram.u8(a + 0x2B),
         }),
         PROLOGUE_CONTROL_CODE => Actor::PrologueControl,
+        _ if SelectState::ALL.iter().any(|s| s.code() == code) => Actor::LevelSelect(LevelSelect {
+            state: SelectState::ALL.into_iter().find(|s| s.code() == code).unwrap(),
+            player: slot_of(ram.u32(a + 0x2E)),
+            id: ram.u8(a + 0x2A),
+            choosing: ram.u8(a + 7),
+            level: ram.u16(a + 0x26),
+            timer: ram.u16(a + 0x28),
+        }),
+        0x42FA | 0x4302 | 0x4306 | 0x436A | 0x4372 | 0x4376 => {
+            let marker = code >= 0x436A;
+            let base = if marker { 0x436A } else { 0x42FA };
+            Actor::LevelFace(LevelFace {
+                started: code != base,
+                ready: code == base + 12,
+                marker,
+                select: slot_of(ram.u32(a + 0x2E)),
+                face: if marker { slot_of(ram.u32(a + 0x32)) } else { 0 },
+                id: ram.u8(a + 0x2A),
+                delay: ram.u16(a + 0x24),
+                draw: ram.u8(a + 6),
+                frame: ram.u8(a + 9),
+                x: ram.u16(a + 0x0A),
+                y: ram.u16(a + 0x0E),
+                // (a marker's +$34 is whatever was in the slot)
+                top: if marker { 0 } else { ram.u16(a + 0x34) },
+                shown: ram.u8(a + 0x28),
+            })
+        }
+        0x75CE | 0x75E6 | 0x764E => Actor::VsCast(VsCast::Cheer {
+            stage: [0x75CE, 0x75E6, 0x764E].iter().position(|&c| c == code).unwrap() as u8,
+            player: slot_of(ram.u32(a + 0x2E)),
+            id: ram.u8(a + 0x2A),
+            alive: ram.u8(a + 7),
+            draw: ram.u8(a + 6),
+            mappings: ram.u8(a + 8),
+            x: ram.u16(a + 0x0A),
+            y: ram.u16(a + 0x0E),
+            mid: ram.u16(a + 0x20),
+            angle: ram.u8(a + 0x36),
+            anim: anim_from(ram, a),
+        }),
+        0x7522 | 0x7534 => Actor::VsCast(VsCast::Orbit {
+            started: code == 0x7534,
+            parent: slot_of(ram.u32(a + 0x2E)),
+            mappings: ram.u8(a + 8),
+            x: ram.u16(a + 0x0A),
+            y: ram.u16(a + 0x0E),
+            cx: ram.u16(a + 0x1E),
+            cy: ram.u16(a + 0x20),
+            angle: ram.u8(a + 0x36),
+            radius: ram.u16(a + 0x38),
+            speed: ram.u8(a + 0x12),
+            draw: ram.u8(a + 6),
+            anim: anim_from(ram, a),
+        }),
+        0x7654 => Actor::VsCast(VsCast::Part {
+            parent: slot_of(ram.u32(a + 0x2E)),
+            dx: ram.u16(a + 0x28),
+            dy: ram.u16(a + 0x2A),
+            draw: ram.u8(a + 6),
+            x: ram.u16(a + 0x0A),
+            y: ram.u16(a + 0x0E),
+            anim: anim_from(ram, a),
+        }),
+        0x76B0 => Actor::VsCast(VsCast::Blink {
+            parent: slot_of(ram.u32(a + 0x2E)),
+            dx: ram.u16(a + 0x28),
+            dy: ram.u16(a + 0x2A),
+            draw: ram.u8(a + 6),
+            frame: ram.u8(a + 9),
+            x: ram.u16(a + 0x0A),
+            y: ram.u16(a + 0x0E),
+            timer: ram.u8(a + 0x22),
+            phase: ram.u8(a + 0x26),
+        }),
+        0x7752 | 0x7786 | 0x77CC | 0x77DC | 0x77E0 | 0x780E => Actor::VsCast(VsCast::Loser {
+            stage: [0x7752, 0x7786, 0x77CC, 0x77DC, 0x77E0, 0x780E].iter().position(|&c| c == code).unwrap() as u8,
+            player: slot_of(ram.u32(a + 0x2E)),
+            id: ram.u8(a + 0x2A),
+            alive: ram.u8(a + 7),
+            draw: ram.u8(a + 6),
+            motion: motion_at(ram, a),
+            timer: ram.u16(a + 0x26),
+            count: ram.u16(a + 0x28),
+            delay: ram.u16(a + 0x24),
+            anim: anim_from(ram, a),
+        }),
+        0x7840 => Actor::VsCast(VsCast::Tear {
+            parent: slot_of(ram.u32(a + 0x2E)),
+            dx: ram.u16(a + 0x28),
+            dy: ram.u16(a + 0x2A),
+            draw: ram.u8(a + 6),
+            x: ram.u16(a + 0x0A),
+            y: ram.u16(a + 0x0E),
+            falling: ram.u8(a + 0x2C) != 0,
+            anim: anim_from(ram, a),
+            restart: ram.u32(a + 0x36),
+        }),
+        0x78E8 | 0x78FE | 0x791A | 0x791E => Actor::VsCast(VsCast::Prompt {
+            stage: [0x78E8, 0x78FE, 0x791A, 0x791E].iter().position(|&c| c == code).unwrap() as u8,
+            draw: ram.u8(a + 6),
+            timer: ram.u16(a + 0x26),
+            delay: ram.u16(a + 0x24),
+        }),
+        0x7F5A => Actor::VsCast(VsCast::Result { anim: anim_from(ram, a) }),
+        0x95FE => Actor::VsCast(VsCast::Countdown { player: slot_of(ram.u32(a + 0x2E)), tens: ram.u8(a + 0x17), ones: ram.u8(a + 0x0F) }),
         0x13686 => Actor::LessonHelper(LessonHelper::Column { parent: slot_of(ram.u32(a + 0x2E)), anim: anim_from(ram, a) }),
         0x136DC => Actor::LessonHelper(LessonHelper::Rotation { parent: slot_of(ram.u32(a + 0x2E)), anim: anim_from(ram, a) }),
         0x1373C => Actor::LessonHelper(LessonHelper::Timer { parent: slot_of(ram.u32(a + 0x2E)), time: ram.u16(a + 0x26) }),
@@ -1161,6 +1268,9 @@ pub fn describe(actor: &Actor) -> String {
         Actor::PrologueControl => "prologue control".into(),
         Actor::CoinSign => "coin sign".into(),
         Actor::Dissolve(d) => format!("{d:X?}"),
+        Actor::LevelSelect(s) => format!("{s:X?}"),
+        Actor::LevelFace(f) => format!("{f:X?}"),
+        Actor::VsCast(c) => format!("{c:X?}"),
         Actor::LessonHelper(h) => format!("{h:X?}"),
         Actor::LessonText(t) => format!("{t:X?}"),
         Actor::LessonPad(p) => format!("{p:X?}"),

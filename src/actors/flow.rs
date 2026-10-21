@@ -192,6 +192,7 @@ impl Engine {
                 self.opponent = value as u8;
             }
             0xFF_112A => self.use_lair = (value >> 8) as u8,
+            0xFF_0128 => self.vs_wins = [(value >> 8) as u8, value as u8],
             0xFF_1972 => {
                 self.high_score_table = (value >> 8) as u8;
                 self.high_score_both = value as u8 != 0;
@@ -218,7 +219,7 @@ impl Engine {
 
     /// The routines `BRUN` calls on the way between matches.
     fn run_routine(&mut self, at: u32, inputs: &Inputs) -> Result<(), Unported> {
-        if self.run_title_routine(at) || self.run_attract_routine(at) || self.run_tutorial_routine(at) || self.run_password_routine(at) || self.run_options_routine(at) || self.run_menu_routine(at) || self.run_game_over_routine(at) || self.run_high_score_routine(at) || self.run_finale_routine(at) || self.run_credits_routine(at) || self.run_epilogue_routine(at) || self.run_intro_routine(at)? {
+        if self.run_title_routine(at) || self.run_attract_routine(at) || self.run_tutorial_routine(at) || self.run_versus_routine(at) || self.run_password_routine(at) || self.run_options_routine(at) || self.run_menu_routine(at) || self.run_game_over_routine(at) || self.run_high_score_routine(at) || self.run_finale_routine(at) || self.run_credits_routine(at) || self.run_epilogue_routine(at) || self.run_intro_routine(at)? {
             return Ok(());
         }
         match at {

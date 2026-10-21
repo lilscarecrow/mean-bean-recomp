@@ -23,6 +23,7 @@ use super::rng::Rng;
 mod draw;
 mod attract;
 mod tutorial;
+mod versus;
 mod credits;
 mod ending;
 mod epilogue;
@@ -45,6 +46,7 @@ mod title;
 pub use draw::*;
 pub use attract::*;
 pub use tutorial::*;
+pub use versus::*;
 pub use credits::*;
 pub use ending::*;
 pub use epilogue::*;
@@ -224,6 +226,9 @@ pub enum Actor {
     Dissolve(Dissolve),
     /// `sub_DE0E`.
     CoinSign,
+    LevelSelect(LevelSelect),
+    LevelFace(LevelFace),
+    VsCast(VsCast),
     LessonHelper(LessonHelper),
     LessonText(LessonText),
     LessonPad(LessonPad),
@@ -240,6 +245,8 @@ impl Actor {
                 | Actor::Icon(_)
                 | Actor::OpaqueQuick
                 | Actor::LessonHelper(LessonHelper::Cue { .. })
+                | Actor::LevelFace(_)
+                | Actor::VsCast(VsCast::Orbit { .. })
                 | Actor::Sparkle(_)
                 | Actor::DangerSpark(_)
                 | Actor::Star(_)
@@ -362,6 +369,9 @@ impl Actor {
             Actor::PrologueControl => Some(PROLOGUE_CONTROL_CODE),
             Actor::Dissolve(d) => Some(d.code()),
             Actor::LessonHelper(h) => Some(h.code()),
+            Actor::LevelSelect(s) => Some(s.state.code()),
+            Actor::LevelFace(f) => Some(f.code()),
+            Actor::VsCast(c) => Some(c.code()),
             Actor::LessonText(_) => Some(0xFFBE),
             Actor::LessonPad(p) => Some(p.code()),
             Actor::CoinSign => Some(0xDE0E),
@@ -467,6 +477,8 @@ pub enum PlayerState {
     ChainNext,
     /// The tutorial's player (`loc_133FA`).
     Lesson(LessonState),
+    /// 1P vs 2P: the loser at the end of a round (`loc_7F70`).
+    Vs(VsState),
 }
 
 impl PlayerState {
@@ -516,6 +528,7 @@ impl PlayerState {
             PlayerState::FallWait => 0x3F42,
             PlayerState::ChainNext => 0x3F5C,
             PlayerState::Lesson(s) => s.code(),
+            PlayerState::Vs(s) => s.code(),
         }
     }
 }
@@ -1191,9 +1204,12 @@ pub struct Engine {
     /// Of those, the ones that came after the frame's last long step (taken once its
     /// bytecode is done).
     pub deferred_tail: u16,
-    /// And one in the middle of one of `GenPuyoOrder`'s `Random` calls (its shuffle
-    /// takes a while), which then writes its seed over the vertical blank's draw.
-    pub order_vblank: bool,
+    /// Or some come in the middle of `GenPuyoOrder` (its shuffle takes a while): after
+    /// so many of its draws, or (true) inside one of its `Random` calls, which then
+    /// writes its seed over the vertical blank's draw.
+    pub order_vblanks: Vec<(usize, bool)>,
+    /// Or one comes in the middle of an actor, right after so many `Random` calls.
+    pub vblank_after_draws: Option<u32>,
     pub vdp_events: Vec<VdpEvent>,
     /// `vdp_reg_0`.. (the register mirror), `hscroll_buffer` (planes A and B).
     pub vdp_regs: [u8; 0x13],
@@ -1285,6 +1301,11 @@ pub struct Engine {
     pub score_at: u16,
     pub lesson: u16,
     pub lesson_tick: u8,
+    /// 1P vs 2P: `byte_FF0128` (each side's wins), `byte_FF012A` (matches each side
+    /// still has to lose before the end) and `word_FF010E` (each side's last level).
+    pub vs_wins: [u8; 2],
+    pub vs_left: [u8; 2],
+    pub vs_levels: [u16; 2],
 }
 
 impl Engine {
@@ -1338,7 +1359,8 @@ impl Engine {
             bytecode_pc: 0,
             bytecode_disabled: true,
             deferred_vblanks: 0,
-            order_vblank: false,
+            order_vblanks: vec![],
+            vblank_after_draws: None,
             deferred_tail: 0,
             vdp_events: vec![],
             vdp_regs: [0; 0x13],
@@ -1379,6 +1401,9 @@ impl Engine {
             score_at: 0xCB1E,
             lesson: 0,
             lesson_tick: 0,
+            vs_wins: [0; 2],
+            vs_left: [0; 2],
+            vs_levels: [0; 2],
             actors_derailed: false,
             unported_extra: None,
             dma_queue: vec![],
@@ -1421,7 +1446,14 @@ impl Engine {
         if self.current_slot != usize::MAX && self.rng_users.last() != Some(&self.current_slot) {
             self.rng_users.push(self.current_slot);
         }
-        self.rng.next()
+        let value = self.rng.next();
+        if let Some(n) = self.vblank_after_draws {
+            self.vblank_after_draws = n.checked_sub(1).filter(|&n| n != 0);
+            if n <= 1 {
+                self.vblank();
+            }
+        }
+        value
     }
 
     /// `SpecPlane89`: one step of every bean falling after a pop. The flag stays set
@@ -1640,6 +1672,9 @@ impl Engine {
                 Actor::PrologueControl => self.run_prologue_control(inputs).then_some(Actor::PrologueControl),
                 Actor::Dissolve(d) => self.run_dissolve(d).map(Actor::Dissolve),
                 Actor::LessonHelper(h) => self.run_lesson_helper(h).map(Actor::LessonHelper),
+                Actor::LevelSelect(s) => self.run_level_select(s, inputs).map(Actor::LevelSelect),
+                Actor::LevelFace(f) => self.run_level_face(f).map(Actor::LevelFace),
+                Actor::VsCast(c) => self.run_vs_cast(c).map(Actor::VsCast),
                 Actor::LessonText(t) => self.run_lesson_text(t).map(Actor::LessonText),
                 Actor::LessonPad(p) => self.run_lesson_pad(p).map(Actor::LessonPad),
                 Actor::CoinSign => None,
@@ -1693,6 +1728,11 @@ impl Engine {
         use PlayerState::*;
         match p.state {
             Lesson(s) => return self.run_lesson_player(slot, p, s, inputs),
+            Vs(s) => {
+                if !self.run_vs_results(&mut p, s, inputs) {
+                    return Ok(None);
+                }
+            }
             WaitPair => {
                 p.w26 = (p.w26 & 0x00FF) | (u16::from(((p.w26 >> 8) as u8).wrapping_add(1)) << 8);
                 if p.flags & (flag::PIVOT_ACTIVE | flag::SATELLITE_ACTIVE) == 0 {
@@ -2349,8 +2389,16 @@ impl Engine {
         }
         p.beans_count = 0;
         p.speed_index = p.speed_index.wrapping_add(1);
+        if self.level_mode & 3 == 1 {
+            // (every 8 steps, the level goes up)
+            if p.speed_index & 7 == 0 && p.speed_level < 0x62 {
+                p.speed_level += 1;
+            }
+            self.vs_fall_rate(p);
+            return Ok(());
+        }
         if self.level_mode & 3 != 0 {
-            return Err(Unported("speed-ups outside scenario mode (unk_9E24, unk_9E7C)"));
+            return Err(Unported("speed-ups in exercise mode (unk_9E7C)"));
         }
         let step = p.speed_index.saturating_sub(self.difficulty) as usize;
         let &(speed, threshold) = SCENARIO_SPEEDS.get(step).ok_or(Unported("speed step past unk_9DC4"))?;

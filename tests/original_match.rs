@@ -101,6 +101,9 @@ fn flow_from(e: &mut Engine, ram: &Ram) {
     e.score_at = ram.u16(0xFF_198A);
     e.lesson = ram.u16(0xFF_196E);
     e.lesson_tick = ram.u8(0xFF_1129);
+    e.vs_wins = [ram.u8(0xFF_0128), ram.u8(0xFF_0129)];
+    e.vs_left = [ram.u8(0xFF_012A), ram.u8(0xFF_012B)];
+    e.vs_levels = [ram.u16(0xFF_010E), ram.u16(0xFF_0110)];
     e.attract_turn = ram.u8(0xFF_1970);
     e.demo_stage = ram.u8(0xFF_1971);
     e.misc_buffer = ram.bytes(0xFF_6800, 0x2000).to_vec();
@@ -135,6 +138,7 @@ struct FlowSnap {
     menu: (u8, bool),
     attract: (u8, u8),
     lesson: (u16, u16, u8, u8, u8),
+    vs: ([u8; 2], [u8; 2], [u16; 2]),
 }
 
 fn flow_snap(e: &Engine) -> FlowSnap {
@@ -155,6 +159,7 @@ fn flow_snap(e: &Engine) -> FlowSnap {
         menu: (e.last_mode, e.use_plane_a_buffer),
         attract: (e.attract_turn, e.demo_stage),
         lesson: (e.lesson, e.score_at, e.lesson_tick, e.cpu_pressed, e.cpu_lean),
+        vs: (e.vs_wins, e.vs_left, e.vs_levels),
     }
 }
 
@@ -176,6 +181,7 @@ fn flow_snap_ram(ram: &Ram) -> FlowSnap {
         menu: (ram.u8(0xFF_0105), ram.u16(0xFF_1956) != 0),
         attract: (ram.u8(0xFF_1970), ram.u8(0xFF_1971)),
         lesson: (ram.u16(0xFF_196E), ram.u16(0xFF_198A), ram.u8(0xFF_1129), ram.u8(0xFF_1D0C), ram.u8(0xFF_1D0D)),
+        vs: ([ram.u8(0xFF_0128), ram.u8(0xFF_0129)], [ram.u8(0xFF_012A), ram.u8(0xFF_012B)], [ram.u16(0xFF_010E), ram.u16(0xFF_0110)]),
     }
 }
 
@@ -445,7 +451,8 @@ fn run_from(
     let mut taken = 0u16;
     // A logic frame whose bytecode run spans several video frames (art decompression):
     // we run it at once, then only the ROM's vertical blanks until it's done.
-    let mut pending: Option<(Inputs, u16)> = None;
+    // (with the RNG seed of each snapshot a vertical blank followed, and how many)
+    let mut pending: Option<(Inputs, u16, Vec<(u32, u16)>)> = None;
     // Draws owed by a vertical blank taken before its Random ran (it finishes before
     // the next frame's).
     let mut owed_random = 0;
@@ -458,43 +465,89 @@ fn run_from(
         // The controllers are the only input.
         let inputs = inputs_for(cur);
         let vblanks = cur.u16(FRAME_COUNT).wrapping_sub(prev.u16(FRAME_COUNT));
-        if let Some((started, mut during)) = pending.take() {
+        if let Some((started, mut during, mut marks)) = pending.take() {
             // Vertical blanks came in the middle of the long frame: the engine takes them
             // at its first long step. Its logic uses the pads as they were when it began.
             during += vblanks;
+            if vblanks != 0 {
+                marks.push((prev.u32(RNG_SEED), vblanks));
+            }
             if bytecode_mid_run(cur) {
-                pending = Some((started, during));
+                pending = Some((started, during, marks));
                 continue;
             }
             let before = engine.clone();
-            engine.deferred_vblanks = during;
+            // Where the vertical blanks came: at the frame's first long step, or (marks)
+            // in the middle of GenPuyoOrder's shuffle: each where the snapshot before it
+            // caught the CPU, after that many draws or one more, or inside a Random call
+            // that then wrote over the vertical blank's draw; or after the shuffle, once
+            // the bytecode is done. (The placement that deals the orders in RAM.)
+            let mut setup = (during, 0u16, vec![]);
+            {
+                // (the shuffle's draws: 504 when P2's order differs)
+                let draws = if cur.u8(0xFF_1964) == 1 { 504 } else { 256 };
+                let (mut inside, mut tail) = (vec![], 0u16);
+                let mut seen = 0usize;
+                for &(seed, n) in &marks {
+                    let Some(steps) = rng_steps(before.rng.seed, seed) else { break };
+                    if steps >= seen + draws {
+                        tail += n;
+                    } else if steps > seen {
+                        inside.extend(std::iter::repeat(steps - seen).take(usize::from(n)));
+                    }
+                    seen += usize::from(n);
+                }
+                let orders = |r: &Ram| [r.bytes(BEAN_ORDERS[0], 256).to_vec(), r.bytes(BEAN_ORDERS[1], 256).to_vec()];
+                let combos = if inside.is_empty() { 0 } else { 3usize.pow(inside.len() as u32) };
+                let found = (0..combos).find_map(|c| {
+                    let order_vblanks: Vec<(usize, bool)> = inside
+                        .iter()
+                        .enumerate()
+                        .map(|(i, &d)| match c / 3usize.pow(i as u32) % 3 {
+                            0 => (d, false),
+                            1 => (d + 1, false),
+                            _ => (d, true),
+                        })
+                        .collect();
+                    let mut t = before.clone();
+                    t.deferred_vblanks = during - inside.len() as u16 - tail;
+                    t.deferred_tail = tail;
+                    t.order_vblanks = order_vblanks.clone();
+                    t.run_bytecode(&started).ok()?;
+                    let dealt = [t.bean_orders[0].to_vec(), t.bean_orders[1].to_vec()];
+                    // (GenPuyoOrder ran and took them)
+                    (t.order_vblanks.is_empty() && dealt == orders(cur)).then_some((during - inside.len() as u16 - tail, tail, order_vblanks))
+                });
+                if let Some(found) = found {
+                    setup = found;
+                }
+            }
+            let prepared = |e: &Engine| {
+                let mut t = e.clone();
+                t.deferred_vblanks = setup.0;
+                t.deferred_tail = setup.1;
+                t.order_vblanks = setup.2.clone();
+                t
+            };
+            engine = prepared(&before);
             if let Err(Unported(what)) = engine.logic(&started) {
                 return Ok(format!("frame {f}: {what}"));
             }
             // (or the last vertical blank came after the frame's last long step)
-            if mismatch(&engine, cur).is_some() && during > 1 {
-                let mut t = before.clone();
-                t.deferred_vblanks = during - 1;
-                t.deferred_tail = 1;
+            if mismatch(&engine, cur).is_some() && setup.0 > 1 {
+                let mut t = prepared(&before);
+                t.deferred_vblanks -= 1;
+                t.deferred_tail += 1;
                 if t.logic(&started).is_ok() && mismatch(&t, cur).is_none() {
-                    engine = t;
-                }
-            }
-            // (or one came in the middle of one of GenPuyoOrder's Random calls)
-            if mismatch(&engine, cur).is_some() && during > 0 {
-                let mut t = before.clone();
-                t.deferred_vblanks = during - 1;
-                t.order_vblank = true;
-                if t.logic(&started).is_ok() && !t.order_vblank && mismatch(&t, cur).is_none() {
                     engine = t;
                 }
             }
             if let Some(m) = mismatch(&engine, cur) {
                 // It may also have been cut in the middle of RunActors.
                 let try_cut = |cut: usize, exact: bool| {
-                    let mut t = before.clone();
-                    t.deferred_vblanks = during;
+                    let mut t = prepared(&before);
                     t.run_bytecode(&started).ok()?;
+                    t.deferred_vblanks += std::mem::take(&mut t.deferred_tail);
                     t.long_step();
                     t.run_slots(0..cut, &started).ok()?;
                     let ok = if exact { mismatch(&t, cur).is_none() } else { mismatch_except(&t, cur, Some(cut)).is_none() };
@@ -532,7 +585,7 @@ fn run_from(
         if bytecode_mid_run(cur) {
             // The logic frame began after this frame's vertical blank.
             (0..vblanks).for_each(|_| engine.vblank());
-            pending = Some((inputs, 0));
+            pending = Some((inputs, 0, vec![]));
             continue;
         }
         if let Some((cut, seen, long_code)) = finishing.take() {
@@ -555,6 +608,25 @@ fn run_from(
             }
             if let Err(Unported(what)) = engine.run_slots(cut..SLOTS, &inputs) {
                 return Ok(format!("frame {f}: {what}"));
+            }
+            // (or the last snapshot caught the actor at the cut halfway, having drawn from
+            // the RNG: the last vertical blank then came between its draws)
+            if mismatch(&engine, cur).is_some() && n > 0 {
+                let mut t = before.clone();
+                for _ in 1..n {
+                    t.vblank();
+                }
+                let inside = rng_steps(t.rng.seed, prev.u32(RNG_SEED)).filter(|&k| k > 0).and_then(|k| {
+                    t.vblank_after_draws = Some(k as u32);
+                    t.run_slots(cut..SLOTS, &inputs).ok()?;
+                    (t.vblank_after_draws.is_none() && mismatch(&t, cur).is_none()).then_some(t)
+                });
+                if let Some(t) = inside {
+                    if std::env::var("MBM_CUT_DEBUG").is_ok() {
+                        eprintln!("frame {f}: vertical blank inside the actor at {cut:X}");
+                    }
+                    engine = t;
+                }
             }
             if let Some(m) = mismatch(&engine, cur) {
                 // Or the long frame ended before the last vertical blank, and the next
@@ -795,6 +867,18 @@ fn run_from(
         }
     }
     Ok("the recording ended".into())
+}
+
+/// Random calls from one seed to another (if within a frame's worth).
+fn rng_steps(from: u32, to: u32) -> Option<usize> {
+    let mut r = Rng::new(from);
+    (0..2000).find(|_| {
+        if r.seed == to {
+            return true;
+        }
+        r.next();
+        false
+    })
 }
 
 /// `MBM_TRACE=from-to`: print a line per frame in that range (before the frame runs).
@@ -1095,7 +1179,7 @@ fn screen_against(
         .find(|&f| {
             let boot = all[f].u32(0xFF_0A36) == 0x18BA && all[f - 1].u32(0xFF_0A36) != 0x18BA;
             // (or a savestate's first frames on a ported screen: the menus)
-            let on_screen = f < 4 && engine_from(&all[f]).is_ok_and(|e| e.slots.iter().flatten().any(menu_screen));
+            let on_screen = f < 8 && engine_from(&all[f]).is_ok_and(|e| e.slots.iter().flatten().any(menu_screen));
             (boot || on_screen || quiet(&all[f]) && all[f].u32(RNG_SEED) != all[f - 1].u32(RNG_SEED)) && snaps.contains_key(&f) && !poked.contains(&f)
         });
     let starts: Vec<(usize, bool)> = flow_start.map(|f| (f, true)).into_iter().chain(setups.iter().map(|&s| (s, false))).collect();

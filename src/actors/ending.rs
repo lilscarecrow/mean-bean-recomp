@@ -41,6 +41,8 @@ pub enum StarState {
     /// $714E: 8 frames, then $7152 bursts into sparks.
     Pause,
     Burst,
+    /// $7262 (1P vs 2P, `loc_71FC`): +$26 frames, then the burst.
+    VsWait,
 }
 
 impl StarState {
@@ -52,6 +54,7 @@ impl StarState {
             StarState::Rise => 0x7132,
             StarState::Pause => 0x714E,
             StarState::Burst => 0x7152,
+            StarState::VsWait => 0x7262,
         }
     }
 }
@@ -161,6 +164,11 @@ pub const PASSWORD_BEAN_CODE: u32 = 0x1A318;
 impl Engine {
     /// `loc_79FC`: the player's pair can't spawn.
     pub(super) fn top_out(&mut self, p: &mut Player) -> Result<(), Unported> {
+        if self.level_mode == 1 {
+            // (no StopSound pause)
+            self.vs_round_lost(p);
+            return Ok(());
+        }
         if self.level_mode >= 1 {
             return Err(Unported("top-out outside scenario mode (loc_7A12)"));
         }
@@ -220,7 +228,7 @@ impl Engine {
     }
 
     /// `ActorDeleteOther` on a player, keeping falling beans whose step is queued.
-    fn delete_player(&mut self, slot: usize) {
+    pub(super) fn delete_player(&mut self, slot: usize) {
         if let Some(Actor::Player(p)) = self.slots[slot].take() {
             if let (true, Some(work)) = (self.fall_commands.contains(&slot), p.pop) {
                 self.orphan_fall = Some((slot, p.id, work));
@@ -338,6 +346,10 @@ impl Engine {
                 let first = usize::from(FIELD_ORIGIN[p.id as usize & 1] & 0x7F) / 2;
                 for i in 0..12 {
                     self.vscroll[(first + i) % 40] = 0;
+                }
+                if self.level_mode & 3 == 1 {
+                    self.start_vs_results(p);
+                    return Ok(true);
                 }
                 // loc_7D78
                 if p.id == 0 {
@@ -464,7 +476,7 @@ impl Engine {
     }
 
     /// `sub_8298`: the sign that rises over the loser's field.
-    fn spawn_continue_sign(&mut self, p: &Player) {
+    pub(super) fn spawn_continue_sign(&mut self, p: &Player) {
         let Some(slot) = self.find_actor_slot() else { return };
         let id = usize::from(p.id & 1);
         let sign = ContinueSign {
@@ -734,7 +746,8 @@ impl Engine {
                     s.state = StarState::Burst;
                 }
             }
-            StarState::Burst => {
+            StarState::VsWait if s.timer != 0 => s.timer -= 1,
+            StarState::Burst | StarState::VsWait => {
                 let script = STAR_SPARKS + u32::from(s.frame) * 8;
                 for i in (0..8u8).rev() {
                     let Some(slot) = self.free_slot() else { continue };
@@ -948,7 +961,7 @@ pub struct NameEntry {
 }
 
 /// `ActorBookmark_Ctrl`: a wait any button press ends.
-fn bookmark_ctrl(delay: &mut u16, press: bool) -> bool {
+pub(super) fn bookmark_ctrl(delay: &mut u16, press: bool) -> bool {
     if press {
         *delay = 0;
         return true;

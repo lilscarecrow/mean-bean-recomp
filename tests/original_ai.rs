@@ -74,8 +74,8 @@ fn analysis_tables_match_the_original() {
                     0x3E1A => true,
                     _ => continue,
                 };
-                if tag != P2 {
-                    continue; // only the CPU fills these
+                if tag != P2 || !ai::is_cpu(cur.u8(0xFF_1964), 1, cur.u8(0xFF_1958)) {
+                    continue; // only the CPU fills these (not P2 in 1P vs 2P)
                 }
                 let mut ours = rom.clone();
                 ai::placement_table(&mut ours, next);

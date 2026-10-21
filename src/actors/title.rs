@@ -293,6 +293,7 @@ impl Engine {
         self.difficulty = [0, 2, 4, 6][usize::from(self.difficulty_option & 3)];
         self.result_score = 0;
         self.result_beans = 0;
+        self.vs_levels = [0; 2];
         self.player_flags = [0; 2];
         self.level = 0;
         self.opponent = 0;

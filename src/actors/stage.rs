@@ -284,7 +284,16 @@ impl Engine {
         match r.state {
             RefereeState::Spawned => {
                 if self.level_mode == 1 {
-                    return Err(Unported("the referee waiting for versus players (loc_5BCE)"));
+                    // loc_5BCE: until both players have picked their level.
+                    let p1_slot = actor_slot(r.link);
+                    let p2_slot = self.player_link(p1_slot);
+                    let flags = |e: &Engine, s: usize| match &e.slots[s] {
+                        Some(Actor::Player(p)) => p.flags,
+                        _ => 0,
+                    };
+                    if (flags(self, p1_slot) | flags(self, p2_slot)) & 1 != 0 {
+                        return Ok(Some(r));
+                    }
                 }
                 r.state = RefereeState::Intro;
             }

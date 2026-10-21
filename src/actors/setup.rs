@@ -6,7 +6,7 @@
 //! but one vertical blank.
 
 use super::*;
-use crate::bean_order::gen_bean_orders;
+use crate::bean_order::gen_bean_orders_with;
 use crate::rom;
 
 /// `unk_3F84`: the scenario speed step each level starts at.
@@ -63,13 +63,29 @@ impl Player {
 impl Engine {
     /// `GenPuyoOrder`: both players' bean orders for the match.
     pub fn deal_bean_orders(&mut self) {
-        if std::mem::take(&mut self.order_vblank) {
-            // (the vertical blank's own draw is lost)
-            let rng = self.rng;
-            self.vblank();
-            self.rng = rng;
-        }
-        let orders = gen_bean_orders(&mut self.rng, self.level, self.level_mode);
+        let vblanks = std::mem::take(&mut self.order_vblanks);
+        let (level, level_mode) = (self.level, self.level_mode);
+        let mut drawn = 0;
+        // (the last call takes those placed past its draws too)
+        let take = |e: &mut Engine, drawn: usize, last: bool| {
+            for &(_, lost) in vblanks.iter().filter(|&&(at, _)| at == drawn || last && at > drawn) {
+                let rng = e.rng;
+                e.vblank();
+                if lost {
+                    e.rng = rng;
+                }
+            }
+        };
+        let orders = gen_bean_orders_with(
+            &mut || {
+                take(self, drawn, false);
+                drawn += 1;
+                self.rng.next()
+            },
+            level,
+            level_mode,
+        );
+        take(self, drawn, true);
         self.rng_calls += if self.level_mode == super::super::bean_order::LEVEL_MODE_SPLIT { 256 + 248 } else { 256 };
         self.bean_orders[0] = orders.p1.map(|c| c as u8);
         self.bean_orders[1] = orders.p2.map(|c| c as u8);
@@ -78,7 +94,7 @@ impl Engine {
     /// `loc_3C00`: spawn the match (the bytecode runs it before `RunActors`, so the new
     /// actors also run that frame).
     pub fn start_match(&mut self) -> Result<(), Unported> {
-        if self.level_mode & 3 != 0 {
+        if self.level_mode & 3 > 1 {
             return Err(Unported("starting a match outside scenario mode"));
         }
         self.score_at = if self.swap_controls != 0 { 0xCC22 } else { 0xCB1E };
@@ -125,16 +141,19 @@ impl Engine {
         if let Some(slot) = self.find_actor_slot() {
             self.slots[slot] = Some(Actor::Animator(Animator { started: false, anim: Anim::new(0), shown: 0 }));
         }
-        // sub_1233A
+        // sub_1233A (the rest in scenario mode only)
         self.cpu_memory = [[0; 10]; 2];
-        self.popping = [false, false];
-        let count = super::super::ai::off::COUNT;
-        self.ai_fields[1].bytes[count..count + 2].fill(0);
-        if let Some(slot) = self.find_actor_slot() {
-            self.slots[slot] = Some(Actor::Danger(Danger { spark_wait: 0, flash_wait: 0, flash: 0 }));
+        if self.level_mode & 3 == 0 {
+            self.popping = [false, false];
+            let count = super::super::ai::off::COUNT;
+            self.ai_fields[1].bytes[count..count + 2].fill(0);
+            if let Some(slot) = self.find_actor_slot() {
+                self.slots[slot] = Some(Actor::Danger(Danger { spark_wait: 0, flash_wait: 0, flash: 0 }));
+            }
         }
-        // sub_3CDA: NEXT and SCORE.
-        self.queue_panel(PanelCommand::Text { entry: PANEL_LABELS, blink: 0, player: 0 });
+        // sub_3CDA: NEXT and SCORE (the VS panel's own text otherwise).
+        let entry = if self.level_mode & 3 == 0 { PANEL_LABELS } else { 0 };
+        self.queue_panel(PanelCommand::Text { entry, blink: 0, player: 0 });
         Ok(())
     }
 
@@ -151,6 +170,13 @@ impl Engine {
         self.reset_field_bytes(id);
         add_points(p, 0); // sub_9C4A: draws the score
         self.queue_panel(PanelCommand::Score(p.id));
+        if self.level_mode & 3 == 1 {
+            // sub_3F94 (VS): ready once the level is picked.
+            p.flags |= 1;
+            self.spawn_level_select(self.current_slot, p.id);
+            p.state = PlayerState::WaitReady;
+            return Ok(());
+        }
         // sub_3F94 (scenario): ready at once (bit 0 set, then cleared again), at this
         // level's speed step.
         p.flags &= !1;
@@ -186,6 +212,12 @@ impl Engine {
     /// $3D80: wait for flag bit 0, then the fall rate for the speed step (`loc_9CF8`).
     pub(super) fn player_ready(&mut self, p: &mut Player) -> Result<(), Unported> {
         if p.flags & 1 != 0 {
+            return Ok(());
+        }
+        if self.level_mode & 3 == 1 {
+            self.vs_fall_rate(p);
+            self.vs_handicap(p);
+            p.state = PlayerState::WaitStart;
             return Ok(());
         }
         let step = p.speed_index.saturating_sub(self.difficulty) as usize;
