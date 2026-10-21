@@ -111,8 +111,8 @@ fn buttons(keys: &ButtonInput<KeyCode>, map: &[(KeyCode, u8)]) -> u8 {
 fn step(keys: Res<ButtonInput<KeyCode>>, mut front: ResMut<Front>, mut windows: Query<&mut Window>) {
     front.game.frame([buttons(&keys, &P1_KEYS), buttons(&keys, &P2_KEYS)]);
     if let Status::Stopped(why) = front.game.status.clone() {
-        // The flow reached something not ported yet (exercise mode): say so for a
-        // second, then power on again.
+        // The flow reached something not ported yet: say so for a second, then power
+        // on again.
         front.linger += 1;
         if front.linger == 1 {
             if let Ok(mut w) = windows.single_mut() {

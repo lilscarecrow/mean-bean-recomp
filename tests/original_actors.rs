@@ -163,6 +163,8 @@ struct Stats {
 
 #[test]
 fn between_pieces_matches_the_original_frame_by_frame() {
+    // (exercise mode's pairs come from the ROM's color tables)
+    support::install_rom();
     let mut stats = Stats::default();
     for path in recordings() {
         let poked = support::poked_frames(&path);
@@ -250,6 +252,12 @@ fn check_piece(
     }
     if (start..=spawn + 1).any(|f| poked.contains(&f)) {
         return Some(spawn + 1); // a test scenario rewrote RAM in the middle
+    }
+    // (exercise mode: its special pieces and level counters aren't pairs and actors
+    // this test rebuilds; whole_matches_run_on_the_engine_alone covers it)
+    if ram.u8(0xFF_1964) == 2 {
+        *stats.unported.entry("exercise mode (see whole_matches)").or_default() += 1;
+        return Some(spawn + 1);
     }
     let (pv, st) = all[spawn].pair(tag, false)?;
     let mut inputs = Inputs::default();

@@ -104,6 +104,8 @@ fn flow_from(e: &mut Engine, ram: &Ram) {
     e.vs_wins = [ram.u8(0xFF_0128), ram.u8(0xFF_0129)];
     e.vs_left = [ram.u8(0xFF_012A), ram.u8(0xFF_012B)];
     e.vs_levels = [ram.u16(0xFF_010E), ram.u16(0xFF_0110)];
+    e.ex_out = ram.u8(0xFF_1965);
+    e.byte_196a = ram.u8(0xFF_196A);
     e.attract_turn = ram.u8(0xFF_1970);
     e.demo_stage = ram.u8(0xFF_1971);
     e.misc_buffer = ram.bytes(0xFF_6800, 0x2000).to_vec();
@@ -139,6 +141,7 @@ struct FlowSnap {
     attract: (u8, u8),
     lesson: (u16, u16, u8, u8, u8),
     vs: ([u8; 2], [u8; 2], [u16; 2]),
+    ex: (u8, u8),
 }
 
 fn flow_snap(e: &Engine) -> FlowSnap {
@@ -160,6 +163,7 @@ fn flow_snap(e: &Engine) -> FlowSnap {
         attract: (e.attract_turn, e.demo_stage),
         lesson: (e.lesson, e.score_at, e.lesson_tick, e.cpu_pressed, e.cpu_lean),
         vs: (e.vs_wins, e.vs_left, e.vs_levels),
+        ex: (e.ex_out, e.byte_196a),
     }
 }
 
@@ -182,6 +186,7 @@ fn flow_snap_ram(ram: &Ram) -> FlowSnap {
         attract: (ram.u8(0xFF_1970), ram.u8(0xFF_1971)),
         lesson: (ram.u16(0xFF_196E), ram.u16(0xFF_198A), ram.u8(0xFF_1129), ram.u8(0xFF_1D0C), ram.u8(0xFF_1D0D)),
         vs: ([ram.u8(0xFF_0128), ram.u8(0xFF_0129)], [ram.u8(0xFF_012A), ram.u8(0xFF_012B)], [ram.u16(0xFF_010E), ram.u16(0xFF_0110)]),
+        ex: (ram.u8(0xFF_1965), ram.u8(0xFF_196A)),
     }
 }
 

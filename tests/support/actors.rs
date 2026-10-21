@@ -149,6 +149,7 @@ pub fn load(ram: &Ram, slot: usize, tag: u8) -> Option<Actor> {
     .into_iter()
     .chain(LessonState::ALL.map(PlayerState::Lesson))
     .chain(VsState::ALL.map(PlayerState::Vs))
+    .chain(ExState::ALL.map(PlayerState::Ex))
     .find(|s| s.code() == code);
     if let Some(state) = player_state {
         return Some(Actor::Player(Player {
@@ -343,9 +344,12 @@ fn load_stage(ram: &Ram, a: u32, code: u32) -> Option<Actor> {
             x: ram.u16(a + 0x0A),
             y: ram.u16(a + 0x0E),
         }),
-        0x5BCE | 0x5BF8 | 0x5C62 => {
+        0x5BCE | 0x5BF8 | 0x5C62 | 0x5D2C | 0x5D42 | 0x5D58 => {
             Actor::Referee(Referee {
-                state: [RefereeState::Spawned, RefereeState::Intro, RefereeState::Idle].into_iter().find(|s| s.code() == code).unwrap(),
+                state: [RefereeState::Spawned, RefereeState::Intro, RefereeState::Idle, RefereeState::Thrown, RefereeState::Away, RefereeState::Back]
+                    .into_iter()
+                    .find(|s| s.code() == code)
+                    .unwrap(),
                 link: ram.u32(a + 0x2E),
                 anim: anim_from(ram, a),
                 draw: ram.u8(a + 6),
@@ -770,6 +774,59 @@ fn load_stage(ram: &Ram, a: u32, code: u32) -> Option<Actor> {
             step_b: ram.u8(a + 0x2B),
         }),
         PROLOGUE_CONTROL_CODE => Actor::PrologueControl,
+        0x89D8 | 0x8A06 | 0x8A1A | 0x8A1E | 0x8A22 | 0x8AA8 | 0x8B48 | 0x8BA6 | 0x8D18 | 0x8D2A | 0x8D6E | 0x8DFE | 0x8E70 => {
+            use SpecialState::*;
+            let state = match code {
+                0x89D8 | 0x8D18 => Spawn,
+                0x8A06 => WaitReferee,
+                0x8A1A => Delay,
+                0x8A1E => Pause,
+                0x8A22 | 0x8D2A => Control,
+                0x8AA8 => Step,
+                0x8B48 => Leave,
+                0x8BA6 => Out,
+                0x8D6E => Landed,
+                0x8DFE => Bore,
+                _ => Bounce,
+            };
+            Actor::Special(Special {
+                state,
+                player: slot_of(ram.u32(a + 0x2E)),
+                id: ram.u8(a + 0x2A),
+                draw: ram.u8(a + 6),
+                flags: ram.u8(a + 7),
+                mappings: ram.u8(a + 8),
+                anim: anim_from(ram, a),
+                motion: motion_at(ram, a),
+                w26: ram.u16(a + 0x26),
+                w28: ram.u16(a + 0x28),
+                rot: ram.u8(a + 0x2B),
+                w36: ram.u16(a + 0x36),
+                delay: ram.u16(a + 0x24),
+            })
+        }
+        0x8F92 => Actor::Debris(Debris {
+            color: ram.u8(a + 8),
+            motion: motion_at(ram, a),
+            timer: ram.u16(a + 0x26),
+            courses: ram.u16(a + 0x28),
+            anim: anim_from(ram, a),
+        }),
+        0x9066 => Actor::FieldShake(FieldShake { phase: ram.u8(a + 0x36), strength: ram.u16(a + 0x38), at: ram.u16(a + 0x26) }),
+        0x5D64 | 0x5D70 | 0x5DC2 | 0x5DE6 | 0x5E1A => Actor::RefereeThrow(RefereeThrow {
+            state: [ThrowState::Start, ThrowState::WindUp, ThrowState::Fly, ThrowState::Away, ThrowState::Return][[0x5D64, 0x5D70, 0x5DC2, 0x5DE6, 0x5E1A].iter().position(|&c| c == code).unwrap()],
+            referee: slot_of(ram.u32(a + 0x2E)),
+            draw: ram.u8(a + 6),
+            motion: motion_at(ram, a),
+            anim: anim_from(ram, a),
+            seat: (ram.u16(a + 0x36), ram.u16(a + 0x38)),
+        }),
+        LEVEL_COUNTER_CODE => Actor::LevelCounter(LevelCounter {
+            side: u8::from(ram.u16(a + 0x0A) == 0xC62C),
+            count: ram.u16(a + 0x26),
+            tens: ram.u8(a + 0x17),
+            ones: ram.u8(a + 0x0F),
+        }),
         _ if SelectState::ALL.iter().any(|s| s.code() == code) => Actor::LevelSelect(LevelSelect {
             state: SelectState::ALL.into_iter().find(|s| s.code() == code).unwrap(),
             player: slot_of(ram.u32(a + 0x2E)),
@@ -1268,6 +1325,11 @@ pub fn describe(actor: &Actor) -> String {
         Actor::PrologueControl => "prologue control".into(),
         Actor::CoinSign => "coin sign".into(),
         Actor::Dissolve(d) => format!("{d:X?}"),
+        Actor::Special(s) => format!("{s:X?}"),
+        Actor::Debris(b) => format!("{b:X?}"),
+        Actor::FieldShake(f) => format!("{f:X?}"),
+        Actor::RefereeThrow(t) => format!("{t:X?}"),
+        Actor::LevelCounter(c) => format!("{c:X?}"),
         Actor::LevelSelect(s) => format!("{s:X?}"),
         Actor::LevelFace(f) => format!("{f:X?}"),
         Actor::VsCast(c) => format!("{c:X?}"),

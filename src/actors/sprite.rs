@@ -35,6 +35,8 @@ impl Engine {
         let field_x = |player: u8, col: u16| FIELD_X[usize::from(player & 1)].wrapping_add(col.wrapping_mul(16)).wrapping_add(8);
         match self.slots[slot].as_ref()? {
             Actor::Pivot(v) => match v.state {
+                // (not run yet: a fresh slot but for its color)
+                PivotState::Init => d(0, v.color as u8, 0, 0, 0),
                 PivotState::Hidden => d(0, v.color as u8, v.pair.pivot_anim.frame, pivot_x(v), hi(v.y)),
                 _ => d(0x80, v.color as u8, v.pair.pivot_anim.frame, pivot_x(v), hi(v.y)),
             },
@@ -44,7 +46,9 @@ impl Engine {
                     _ => s.anim.frame,
                 };
                 let hidden = matches!(&self.slots[s.pivot_slot], Some(Actor::Pivot(p)) if p.state == PivotState::Hidden);
-                d(if hidden { 0 } else { 0x80 }, s.color as u8, frame, s.x, hi(s.y))
+                // (not run yet: a fresh slot but for its color)
+                let fresh = s.state == SatelliteState::Init;
+                d(if hidden || fresh { 0 } else { 0x80 }, s.color as u8, if fresh { 0 } else { frame }, s.x, hi(s.y))
             }
             Actor::Effect(e) => d(0x80, e.color, e.frame, e.x, hi(e.y)),
             Actor::Burst(b) => d(0x80, b.color, b.anim.frame, b.x, b.y),
@@ -63,6 +67,9 @@ impl Engine {
             Actor::DangerSpark(s) => d(s.draw, 0x25, s.anim.frame, hi(s.motion.x), hi(s.motion.y)),
             Actor::Star(s) => d(s.draw, s.color, s.frame, hi(s.motion.x), hi(s.motion.y)),
             Actor::LevelFace(f) => d(f.draw, if f.marker { 0x21 } else { 0x30 }, f.frame, f.x, f.y),
+            Actor::Special(s) => d(s.draw, s.mappings, s.anim.frame, hi(s.motion.x), hi(s.motion.y)),
+            Actor::Debris(b) => d(0x83, b.color, b.anim.frame, hi(b.motion.x), hi(b.motion.y)),
+            Actor::RefereeThrow(t) => d(t.draw, 0, t.anim.frame, hi(t.motion.x), hi(t.motion.y)),
             Actor::VsCast(c) => match c {
                 VsCast::Cheer { draw, mappings, x, y, anim, .. } => d(*draw, *mappings, anim.frame, *x, *y),
                 VsCast::Orbit { draw, mappings, x, y, anim, .. } => d(*draw, *mappings, anim.frame, *x, *y),

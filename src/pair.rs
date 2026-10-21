@@ -180,6 +180,17 @@ impl Pair {
         (step, events)
     }
 
+    /// A special piece's controlled frame ($8A22 / $8D2A): move and fall, no turning
+    /// (its own animation is the actor's).
+    pub fn step_special(&mut self, field: &Field, mut pad: impl PadSource, fall_speed: u16, frame_count: u16) -> (Step, PivotEvents) {
+        let anim = self.pivot_anim;
+        self.slide_or_move(field, &mut pad);
+        let mut events = PivotEvents::default();
+        let step = self.fall(field, &mut pad, fall_speed, frame_count, &mut events);
+        self.pivot_anim = anim;
+        (step, events)
+    }
+
     /// The satellite actor's frame ($5482): animate, turn.
     pub fn step_satellite(&mut self) {
         self.sat_anim.step();

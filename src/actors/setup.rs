@@ -94,9 +94,6 @@ impl Engine {
     /// `loc_3C00`: spawn the match (the bytecode runs it before `RunActors`, so the new
     /// actors also run that frame).
     pub fn start_match(&mut self) -> Result<(), Unported> {
-        if self.level_mode & 3 > 1 {
-            return Err(Unported("starting a match outside scenario mode"));
-        }
         self.score_at = if self.swap_controls != 0 { 0xCC22 } else { 0xCB1E };
         self.time_frames = 0;
         self.time_minutes = 0;
@@ -154,6 +151,9 @@ impl Engine {
         // sub_3CDA: NEXT and SCORE (the VS panel's own text otherwise).
         let entry = if self.level_mode & 3 == 0 { PANEL_LABELS } else { 0 };
         self.queue_panel(PanelCommand::Text { entry, blink: 0, player: 0 });
+        if self.level_mode == 2 {
+            self.start_exercise();
+        }
         Ok(())
     }
 
@@ -164,6 +164,15 @@ impl Engine {
             return Err(Unported("the lesson's hint message (sub_11EF2)"));
         }
         self.spawn_pair_holder(p, 0);
+        if self.level_mode & 3 == 2 {
+            // (the side that didn't press START waits)
+            if self.byte_196a != p.id && self.level_mode & 2 != 0 {
+                self.exercise_wait(p);
+            } else {
+                self.set_up_exercise(p);
+            }
+            return Ok(());
+        }
         // loc_3D44
         self.popping[id] = false;
         self.fields[id] = Field::default(); // ResetPuyoField
@@ -191,7 +200,16 @@ impl Engine {
         let Some(slot) = self.find_actor_slot() else { return };
         p.holder_slot = Some(slot);
         let mut h = PairHolder { w20: 0, pairs: [0; 6], dealt: 0, b07: 0 };
-        for at in [4, 2, 0] {
+        if self.level_mode & 3 == 2 {
+            // (random pairs, no special piece yet)
+            h.w20 = 0xFFFF;
+            for at in [4, 2, 0] {
+                let (a, b) = self.exercise_pair(&mut h, p.speed_level);
+                h.pairs[at] = a;
+                h.pairs[at + 1] = b;
+            }
+        }
+        for at in [4, 2, 0].into_iter().filter(|_| self.level_mode & 3 != 2) {
             let order = &self.bean_orders[usize::from(p.id != 0)];
             let i = usize::from((h.w20 >> 8) as u8);
             h.pairs[at] = order[i];
@@ -217,6 +235,13 @@ impl Engine {
         if self.level_mode & 3 == 1 {
             self.vs_fall_rate(p);
             self.vs_handicap(p);
+            p.state = PlayerState::WaitStart;
+            return Ok(());
+        }
+        if self.level_mode & 3 == 2 {
+            self.exercise_fall_rate(p);
+            self.exercise_start_level(p);
+            self.show_level(p, 1);
             p.state = PlayerState::WaitStart;
             return Ok(());
         }

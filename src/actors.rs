@@ -24,6 +24,8 @@ mod draw;
 mod attract;
 mod tutorial;
 mod versus;
+mod exercise;
+mod special;
 mod credits;
 mod ending;
 mod epilogue;
@@ -47,6 +49,8 @@ pub use draw::*;
 pub use attract::*;
 pub use tutorial::*;
 pub use versus::*;
+pub use exercise::*;
+pub use special::*;
 pub use credits::*;
 pub use ending::*;
 pub use epilogue::*;
@@ -229,6 +233,11 @@ pub enum Actor {
     LevelSelect(LevelSelect),
     LevelFace(LevelFace),
     VsCast(VsCast),
+    LevelCounter(LevelCounter),
+    Special(Special),
+    Debris(Debris),
+    FieldShake(FieldShake),
+    RefereeThrow(RefereeThrow),
     LessonHelper(LessonHelper),
     LessonText(LessonText),
     LessonPad(LessonPad),
@@ -246,6 +255,7 @@ impl Actor {
                 | Actor::OpaqueQuick
                 | Actor::LessonHelper(LessonHelper::Cue { .. })
                 | Actor::LevelFace(_)
+                | Actor::Debris(_)
                 | Actor::VsCast(VsCast::Orbit { .. })
                 | Actor::Sparkle(_)
                 | Actor::DangerSpark(_)
@@ -372,6 +382,11 @@ impl Actor {
             Actor::LevelSelect(s) => Some(s.state.code()),
             Actor::LevelFace(f) => Some(f.code()),
             Actor::VsCast(c) => Some(c.code()),
+            Actor::LevelCounter(_) => Some(LEVEL_COUNTER_CODE),
+            Actor::Special(s) => Some(s.code()),
+            Actor::Debris(_) => Some(DEBRIS_CODE),
+            Actor::FieldShake(_) => Some(FIELD_SHAKE_CODE),
+            Actor::RefereeThrow(t) => Some(t.code()),
             Actor::LessonText(_) => Some(0xFFBE),
             Actor::LessonPad(p) => Some(p.code()),
             Actor::CoinSign => Some(0xDE0E),
@@ -479,6 +494,8 @@ pub enum PlayerState {
     Lesson(LessonState),
     /// 1P vs 2P: the loser at the end of a round (`loc_7F70`).
     Vs(VsState),
+    /// Exercise mode: after the game, or the side waiting to join (`loc_80EE`..).
+    Ex(ExState),
 }
 
 impl PlayerState {
@@ -529,6 +546,7 @@ impl PlayerState {
             PlayerState::ChainNext => 0x3F5C,
             PlayerState::Lesson(s) => s.code(),
             PlayerState::Vs(s) => s.code(),
+            PlayerState::Ex(s) => s.code(),
         }
     }
 }
@@ -1306,6 +1324,8 @@ pub struct Engine {
     pub vs_wins: [u8; 2],
     pub vs_left: [u8; 2],
     pub vs_levels: [u16; 2],
+    /// Exercise mode: `byte_FF1965`, a bit per side that has sat out its wait.
+    pub ex_out: u8,
 }
 
 impl Engine {
@@ -1404,6 +1424,7 @@ impl Engine {
             vs_wins: [0; 2],
             vs_left: [0; 2],
             vs_levels: [0; 2],
+            ex_out: 0,
             actors_derailed: false,
             unported_extra: None,
             dma_queue: vec![],
@@ -1675,6 +1696,11 @@ impl Engine {
                 Actor::LevelSelect(s) => self.run_level_select(s, inputs).map(Actor::LevelSelect),
                 Actor::LevelFace(f) => self.run_level_face(f).map(Actor::LevelFace),
                 Actor::VsCast(c) => self.run_vs_cast(c).map(Actor::VsCast),
+                Actor::LevelCounter(c) => self.run_level_counter(c).map(Actor::LevelCounter),
+                Actor::Special(s) => self.run_special(s, inputs).map(Actor::Special),
+                Actor::Debris(d) => self.run_debris(d).map(Actor::Debris),
+                Actor::FieldShake(f) => self.run_field_shake(f).map(Actor::FieldShake),
+                Actor::RefereeThrow(t) => self.run_referee_throw(t).map(Actor::RefereeThrow),
                 Actor::LessonText(t) => self.run_lesson_text(t).map(Actor::LessonText),
                 Actor::LessonPad(p) => self.run_lesson_pad(p).map(Actor::LessonPad),
                 Actor::CoinSign => None,
@@ -1730,6 +1756,11 @@ impl Engine {
             Lesson(s) => return self.run_lesson_player(slot, p, s, inputs),
             Vs(s) => {
                 if !self.run_vs_results(&mut p, s, inputs) {
+                    return Ok(None);
+                }
+            }
+            Ex(s) => {
+                if !self.run_exercise_player(&mut p, s, inputs) {
                     return Ok(None);
                 }
             }
@@ -1841,6 +1872,10 @@ impl Engine {
                     ai::analyze(&mut self.ai_fields[id]);
                     if self.level_mode & 3 == 0 && id == 1 {
                         self.crowding = ai::crowding(&self.ai_fields[1], &self.ai_fields[0]);
+                    }
+                    if self.level_mode & 3 == 2 {
+                        self.exercise_specials_due(&p); // sub_88A8
+                        self.all_clear_bonus(&mut p); // sub_9332
                     }
                     p.state = PreSpawn1;
                 }
@@ -2362,7 +2397,7 @@ impl Engine {
     }
 
     /// `sub_9A56`: base points and bonus for this chain step, and the bean counters.
-    fn score_step(&self, p: &mut Player) {
+    fn score_step(&mut self, p: &mut Player) {
         let groups = &p.pop.as_ref().unwrap().groups;
         let beans: usize = groups.iter().map(|g| g.cells.len()).sum();
         let mut colors: Vec<u8> = groups.iter().map(|g| g.color as u8).collect();
@@ -2378,6 +2413,9 @@ impl Engine {
         }
         p.beans_total = (p.beans_total as usize + beans).min(9999) as u16;
         p.beans_count = (p.beans_count as usize + beans).min(0xFFFF) as u16;
+        if self.level_mode & 3 == 2 {
+            self.queue_panel(PanelCommand::Beans { player: p.id, count: p.beans_total }); // sub_94E0
+        }
         p.base = (10 * beans as u32 * multiplier).min(0xFFFF) as u16;
         p.bonus = bonus.min(999);
     }
@@ -2398,7 +2436,12 @@ impl Engine {
             return Ok(());
         }
         if self.level_mode & 3 != 0 {
-            return Err(Unported("speed-ups in exercise mode (unk_9E7C)"));
+            if p.speed_index & 7 == 0 && p.speed_level < 0x62 {
+                p.speed_level += 1;
+                self.show_level(p, 0x80); // sub_9502
+            }
+            self.exercise_fall_rate(p);
+            return Ok(());
         }
         let step = p.speed_index.saturating_sub(self.difficulty) as usize;
         let &(speed, threshold) = SCENARIO_SPEEDS.get(step).ok_or(Unported("speed step past unk_9DC4"))?;
@@ -2432,6 +2475,11 @@ impl Engine {
         let (pivot_color, sat_color) = match holder {
             Some(h) => {
                 let (a, b) = self.deal_pair(h, p)?;
+                if a == 0x19 || b == 0x1A {
+                    // (before the field's checked: a special piece always comes)
+                    self.spawn_special(player_slot, p, if a == 0x19 { 0x19 } else { 0x1A })?;
+                    return Ok(true);
+                }
                 let color = |c: u8| BeanColor::from_id(c).ok_or(Unported("special pieces (sub_4E24)"));
                 (color(a)?, color(b)?)
             }

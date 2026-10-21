@@ -197,11 +197,14 @@ fn palette_lines_are_rom_palettes() {
     let table: Vec<[u16; 16]> = (0..=255u8).map(|i| palette::from_table(&rom, i)).collect();
     let (mut lines, mut matched) = (0, 0);
     for path in support::recordings() {
+        let mut was_fading = false;
         for ram in support::frames(&path) {
-            // Not while fading, and only while the match runs (bytecode disabled): the
-            // game flow's fade to black afterwards stops just short of black.
+            // Not while fading (or the frame it ends: its last step shows next), and only
+            // while the match runs (bytecode disabled): the game flow's fade to black
+            // afterwards stops just short of black.
             let fading = (0..4).any(|i| ram.u16(0xFF_0AD6 + i * 0x82) != 0);
-            if fading || ram.u8(0xFF_0A3B) == 0 || !ram.actors().any(|a| ram.code(a) == 0x5C62) {
+            let skip = std::mem::replace(&mut was_fading, fading) || fading;
+            if skip || ram.u8(0xFF_0A3B) == 0 || !ram.actors().any(|a| ram.code(a) == 0x5C62) {
                 continue;
             }
             for line in 0..3u32 {

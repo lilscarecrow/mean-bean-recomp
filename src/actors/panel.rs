@@ -47,6 +47,8 @@ pub enum PanelCommand {
     VsBox { player: u8, frame: u8 },
     /// $88 (`SpecPlane88`): a level in it, highlighted with $8000.
     VsLevel { player: u8, word: u16 },
+    /// $93 (`SpecPlane93`): a side's bean count (exercise mode).
+    Beans { player: u8, count: u16 },
 }
 
 /// `SpecPlane92`'s digits (5 x 7 words each, less $1E00) and where they go.
@@ -127,6 +129,7 @@ impl Engine {
                 PanelCommand::Wipe { player, frame } => self.draw_wipe(player, frame),
                 PanelCommand::VsBox { player, frame } => self.draw_vs_box(player, frame),
                 PanelCommand::VsLevel { player, word } => self.draw_vs_level(player, word),
+                PanelCommand::Beans { player, count } => self.draw_beans(player, count),
                 PanelCommand::IntroBox { kind, size, at } => self.draw_intro_box(kind, size, at),
                 PanelCommand::List(list) => {
                     let row = self.plane_row();

@@ -51,6 +51,11 @@ pub enum RefereeState {
     Intro,
     /// $5C62: idle animations, chosen at random.
     Idle,
+    /// A $19 piece takes its seat (`loc_5D0C`): $5D2C until thrown off, $5D42 away,
+    /// $5D58 until back.
+    Thrown,
+    Away,
+    Back,
 }
 
 impl RefereeState {
@@ -59,6 +64,9 @@ impl RefereeState {
             RefereeState::Spawned => 0x5BCE,
             RefereeState::Intro => 0x5BF8,
             RefereeState::Idle => 0x5C62,
+            RefereeState::Thrown => 0x5D2C,
+            RefereeState::Away => 0x5D42,
+            RefereeState::Back => 0x5D58,
         }
     }
 }
@@ -253,7 +261,7 @@ impl Engine {
                 h.w20 = h.w20.wrapping_add(0x200);
                 Ok(pair)
             }
-            _ => Err(Unported("exercise mode pairs (sub_43EA)")),
+            _ => Ok(self.exercise_pair(h, p.speed_level)),
         }
     }
 
@@ -321,9 +329,31 @@ impl Engine {
                 self.player_mut(p2_slot).flags &= !2;
                 r.state = RefereeState::Idle;
             }
+            RefereeState::Thrown => {
+                if self.referee_hit & 0xFF == 0 {
+                    r.draw &= 0x7F;
+                    r.state = RefereeState::Away;
+                }
+            }
+            RefereeState::Away => {
+                if self.referee_hit & 0xFF != 0 {
+                    r.draw |= 0x80;
+                    r.state = RefereeState::Back;
+                }
+            }
+            RefereeState::Back => {
+                if self.referee_hit & 0xFF == 0 {
+                    r.state = RefereeState::Idle; // loc_5C5E
+                }
+            }
             RefereeState::Idle => {
                 if self.referee_hit & 0x8000 != 0 {
-                    return Err(Unported("referee knocked out (loc_5D0C)"));
+                    // loc_5D0C
+                    let me = self.current_slot;
+                    if self.throw_referee(me) {
+                        r.state = RefereeState::Thrown;
+                    }
+                    return Ok(Some(r));
                 }
                 if self.player_flags[0] & self.player_flags[1] & 0x80 != 0 {
                     return Err(Unported("match over (loc_5E86)"));

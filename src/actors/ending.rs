@@ -169,6 +169,10 @@ impl Engine {
             self.vs_round_lost(p);
             return Ok(());
         }
+        if self.level_mode == 2 {
+            self.exercise_topped_out(p);
+            return Ok(());
+        }
         if self.level_mode >= 1 {
             return Err(Unported("top-out outside scenario mode (loc_7A12)"));
         }
@@ -351,6 +355,10 @@ impl Engine {
                     self.start_vs_results(p);
                     return Ok(true);
                 }
+                if self.level_mode & 3 == 2 {
+                    self.exercise_over(p);
+                    return Ok(true);
+                }
                 // loc_7D78
                 if p.id == 0 {
                     // loc_7EC2
@@ -491,7 +499,7 @@ impl Engine {
 
     /// `sub_C438`: put the score in the high score table of `high_score_table` if it
     /// beats an entry (scores at +6, beans at +$0A, a new entry marked $FF at +0).
-    fn enter_high_score(&mut self, p: &Player) -> Option<u16> {
+    pub(super) fn enter_high_score(&mut self, p: &Player) -> Option<u16> {
         let table = usize::from(self.high_score_table);
         if table >= 4 {
             return None;
@@ -512,7 +520,7 @@ impl Engine {
     }
 
     /// `sub_BFA6`: enter a name for the new high score; the player waits on flag bit 1.
-    fn spawn_name_entry(&mut self, p: &mut Player, rank: u16) {
+    pub(super) fn spawn_name_entry(&mut self, p: &mut Player, rank: u16) {
         let Some(slot) = self.find_actor_slot() else { return };
         p.flags = 3;
         let entry = NameEntry {

@@ -18,6 +18,7 @@ const STARS_STEP: [u16; 2] = [0x282, 0x27E];
 const STAR_TILE: u16 = 0x832A;
 /// `word_3FE0`: the face's x.
 const FACE_X: [u16; 2] = [0xD4, 0x14C];
+/// (exercise mode: $B8, levels $14 apart rather than $18)
 const FACE_Y: u16 = 0xB0;
 /// `word_42C8`: five colors per level (palette line 3, colors 4-8 for P1, 9-13 P2).
 const FACE_COLORS: u32 = 0x42C8;
@@ -309,7 +310,8 @@ impl Engine {
         // loc_41EC
         let Some(face) = self.free_slot() else { return };
         let frame = if id == 0 { 0 } else { 5 };
-        let f = LevelFace { started: false, ready: false, marker: false, select, face: 0, id, delay: 0, draw: 0, frame, x: FACE_X[side], y: FACE_Y, top: FACE_Y, shown: 0 };
+        let top = if self.level_mode & 2 != 0 { 0xB8 } else { FACE_Y };
+        let f = LevelFace { started: false, ready: false, marker: false, select, face: 0, id, delay: 0, draw: 0, frame, x: FACE_X[side], y: top, top, shown: 0 };
         self.slots[face] = Some(Actor::LevelFace(f));
         self.face_colors(id, 0);
         let Some(marker) = self.free_slot() else { return };
@@ -357,9 +359,9 @@ impl Engine {
                     s.state = SelectState::Picked;
                 } else {
                     let step = if press & 1 != 0 && s.level != 0 {
-                        Some(0xFFFFu16)
+                        Some(if self.level_mode & 2 != 0 { 0xFFFEu16 } else { 0xFFFF })
                     } else if press & 1 == 0 && press & 2 != 0 && s.level < 4 {
-                        Some(1)
+                        Some(if self.level_mode & 2 != 0 { 2 } else { 1 })
                     } else {
                         None
                     };
@@ -438,7 +440,7 @@ impl Engine {
                 _ => (0, 0),
             };
             f.frame = shown;
-            f.y = u16::from(shown) * 0x18 + top + 0x20;
+            f.y = u16::from(shown) * self.level_spacing() + top + 0x20;
             return Some(f);
         }
         if level == f.shown {
@@ -446,10 +448,15 @@ impl Engine {
         }
         f.shown = level;
         f.frame = if f.id == 0 { level } else { level + 5 };
-        f.y = u16::from(level) * 0x18 + f.top;
+        f.y = u16::from(level) * self.level_spacing() + f.top;
         self.face_colors(f.id, level);
         self.load_palette(3, PaletteLoad::Buffer);
         Some(f)
+    }
+
+    /// The faces' spacing per level (`loc_4338`).
+    fn level_spacing(&self) -> u16 {
+        if self.level_mode & 2 != 0 { 0x14 } else { 0x18 }
     }
 
     /// `loc_9CF8` (VS: `loc_9D42`): the fall rate and speed-up threshold for the speed
