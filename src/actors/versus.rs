@@ -166,7 +166,8 @@ pub enum VsState {
     NextWait,
     NextGo,
     /// $7FFA: the match is over: $80 frames, then $7FFE the countdown, $8020 the
-    /// blinking prompt, $802A until START or the countdown runs out.
+    /// blinking prompt, $802A until START or the countdown runs out (with
+    /// `wait_to_continue`, not in the ROM: no countdown, until START).
     OverWait,
     Countdown,
     Prompt,
@@ -576,8 +577,10 @@ impl Engine {
             Countdown => {
                 p.w28 = 0x280;
                 p.flags &= !8;
-                // sub_95B0
-                if let Some(slot) = self.find_actor_slot() {
+                // sub_95B0 (none when waiting for START: there's nothing to count)
+                if !self.wait_to_continue
+                    && let Some(slot) = self.find_actor_slot()
+                {
                     let player = self.current_slot;
                     self.slots[slot] = Some(Actor::VsCast(VsCast::Countdown { player, tens: 0, ones: 0 }));
                 }
@@ -599,7 +602,10 @@ impl Engine {
                     return false;
                 }
                 let prompt = PanelCommand::Text { entry: PROMPT_TEXT, blink: 0, player: p.id };
-                if p.w28 == 0 {
+                if self.wait_to_continue {
+                    self.queue_panel(prompt);
+                    self.queue_panel(PanelCommand::Text { entry: PRESS_START_TEXT, blink: 0x0F, player: p.id });
+                } else if p.w28 == 0 {
                     // loc_8084
                     self.queue_panel(prompt);
                     p.flags &= !2;

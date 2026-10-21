@@ -176,7 +176,9 @@ pub struct Online {
 }
 
 impl Online {
-    pub fn new(start: Game) -> Online {
+    pub fn new(mut start: Game) -> Online {
+        // (a match over the network waits for the loser to play again or leave)
+        start.engine.wait_to_continue = true;
         Online { lobby: Lobby::default(), game: None, start: Arc::new(start), linger: 0, sounds: vec![] }
     }
 }
