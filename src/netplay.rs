@@ -1,13 +1,14 @@
-//! Playing over the network: two copies of the game kept in step by trading pad inputs
-//! (delay-based lockstep). The engine is deterministic, so if both sides start from the
-//! same seed and feed [`Game::frame`](crate::game::Game::frame) the same two pads every
-//! frame, they play the same game; only the buttons cross the wire.
+//! Playing over the network: the connection two copies of the game trade pad inputs
+//! over. The engine is deterministic, so if both sides start from the same seed and feed
+//! [`Game::frame`](crate::game::Game::frame) the same two pads every frame, they play the
+//! same game; only the buttons cross the wire. [`rollback`](crate::rollback) plays the
+//! frames: ours straight away, the other player's guessed until they arrive.
 //!
-//! Each side's input for frame `f` is the buttons it read `delay` frames earlier, which
-//! gives the packet that long to arrive. A side that doesn't have the other's input for
-//! the next frame yet waits (the game holds still), so the two never drift apart. Every
-//! packet carries all the inputs the peer hasn't acknowledged yet, so a lost packet
-//! costs nothing but the wait for the next one.
+//! Each side's input for frame `f` is the buttons it read `delay` frames earlier (0
+//! unless the host asks for more: a little delay means fewer wrong guesses on a slow
+//! connection). Every packet carries all the inputs the peer hasn't acknowledged yet,
+//! so a lost packet costs nothing but the wait for the next one, and says how far along
+//! the sender is, so the side that's ahead can wait for the other.
 //!
 //! The host is player 1 and picks the seed and the delay; whoever joins is player 2.
 //! Both must run the same ROM (checked when they connect), and every [`CHECK_EVERY`]
@@ -18,7 +19,8 @@
 //! - welcome (host to joiner): seed (u32), delay (u8)
 //! - reject: the reason, as text
 //! - inputs: frames of ours the sender has (u32), first frame here (u32), checksum
-//!   frame (u32) and value (u32), then one button byte per frame
+//!   frame (u32) and value (u32), the sender's frame (u32) and how far it thinks it's
+//!   ahead of us (i32), then one button byte per frame
 //! - bye: nothing
 //!
 //! Numbers are big-endian.
@@ -29,16 +31,16 @@ use std::net::{SocketAddr, ToSocketAddrs, UdpSocket};
 use std::time::{Duration, Instant};
 
 pub const DEFAULT_PORT: u16 = 7845;
-/// Frames between reading a pad and playing it: 3 frames (50ms) covers a LAN or a
-/// nearby connection.
-pub const DEFAULT_DELAY: u8 = 3;
+/// Frames between reading a pad and playing it (rollback covers the wait for the
+/// other player's).
+pub const DEFAULT_DELAY: u8 = 0;
 /// The most delay the host may ask for (half a second).
 pub const MAX_DELAY: u8 = 30;
 /// How often (in frames) the two sides compare checksums.
 pub const CHECK_EVERY: u32 = 60;
 
 const MAGIC: &[u8; 4] = b"MBMN";
-const VERSION: u8 = 1;
+const VERSION: u8 = 2;
 const HELLO: u8 = 0;
 const WELCOME: u8 = 1;
 const REJECT: u8 = 2;
@@ -79,6 +81,12 @@ pub struct Session {
     remote: Vec<u8>,
     /// How many of `local` the peer has.
     acked: u32,
+    /// Our frame and how far ahead of the peer we think we are (sent), and the same
+    /// from the peer.
+    frame: u32,
+    advantage: i32,
+    peer_frame: u32,
+    peer_advantage: i32,
     /// Our recent checksums (frame, value), and the peer's latest.
     checks: VecDeque<(u32, u32)>,
     peer_check: Option<(u32, u32)>,
@@ -121,6 +129,10 @@ impl Session {
             local: vec![],
             remote: vec![],
             acked: 0,
+            frame: 0,
+            advantage: 0,
+            peer_frame: 0,
+            peer_advantage: 0,
             checks: VecDeque::new(),
             peer_check: None,
             last_hello: None,
@@ -169,7 +181,7 @@ impl Session {
         self.peer
     }
 
-    /// Reads whatever has arrived. Call once a tick, before [`step`](Self::step).
+    /// Reads whatever has arrived. Call once a tick, before playing.
     pub fn receive(&mut self) {
         let mut buf = [0u8; 512];
         loop {
@@ -187,26 +199,43 @@ impl Session {
         }
     }
 
-    /// Records our buttons (read now) for frame `frame + delay`, and returns both pads
-    /// for `frame` if the peer's have arrived. `frame` is the next frame to play.
-    pub fn step(&mut self, frame: u32, buttons: u8) -> Option<[u8; 2]> {
-        if self.state != State::Playing {
-            return None;
-        }
-        let ahead = frame as usize + usize::from(self.delay);
-        // (only as many as playing `frame` needs: waiting doesn't pile inputs up)
-        while self.local.len() <= ahead {
-            self.local.push(buttons);
-        }
-        let f = frame as usize;
-        let (ours, theirs) = (*self.local.get(f)?, *self.remote.get(f)?);
-        Some(if self.host { [ours, theirs] } else { [theirs, ours] })
+    /// Records our buttons, read now, as our input `delay` frames on: call once for
+    /// every frame played.
+    pub fn push_local(&mut self, buttons: u8) {
+        self.local.push(buttons);
     }
 
-    /// Whether the peer is far enough ahead that we should play an extra frame this tick
-    /// to catch up (`frame` is the next frame to play).
-    pub fn behind(&self, frame: u32) -> bool {
-        self.remote.len() > frame as usize + usize::from(self.delay) + 2
+    /// Our buttons for `frame`, once recorded.
+    pub fn local(&self, frame: u32) -> Option<u8> {
+        self.local.get(frame as usize).copied()
+    }
+
+    /// The other player's buttons for `frame`, once they've arrived.
+    pub fn remote(&self, frame: u32) -> Option<u8> {
+        self.remote.get(frame as usize).copied()
+    }
+
+    /// How many frames of the other player's buttons have arrived (all of them, from
+    /// frame 0: a gap is waited for).
+    pub fn remote_len(&self) -> u32 {
+        self.remote.len() as u32
+    }
+
+    /// The other player's latest buttons (nothing before any arrive): the best guess
+    /// for the frames still to come.
+    pub fn last_remote(&self) -> u8 {
+        self.remote.last().copied().unwrap_or(0)
+    }
+
+    /// Where we are, for the peer: our frame and how far ahead of theirs we think it is.
+    pub fn set_progress(&mut self, frame: u32, advantage: i32) {
+        self.frame = frame;
+        self.advantage = advantage;
+    }
+
+    /// The peer's frame and how far ahead of ours it thought it was, as last heard.
+    pub fn peer_progress(&self) -> (u32, i32) {
+        (self.peer_frame, self.peer_advantage)
     }
 
     /// Our checksum of the game after `frame` frames, to compare with the peer's.
@@ -235,7 +264,7 @@ impl Session {
                 let from = (self.acked as usize).min(self.local.len());
                 let to = self.local.len().min(from + MAX_INPUTS);
                 let (cf, cv) = self.checks.back().copied().unwrap_or((0, 0));
-                for n in [self.remote.len() as u32, from as u32, cf, cv] {
+                for n in [self.remote.len() as u32, from as u32, cf, cv, self.frame, self.advantage as u32] {
                     p.extend_from_slice(&n.to_be_bytes());
                 }
                 p.extend_from_slice(&self.local[from..to]);
@@ -243,6 +272,12 @@ impl Session {
             }
             State::Waiting | State::Closed(_) => {}
         }
+    }
+
+    /// Tests: drops every `n`th packet we send (0: none).
+    #[cfg(test)]
+    pub(crate) fn lose_every(&mut self, n: u32) {
+        self.lose_every = n;
     }
 
     /// Tells the peer we're leaving, and closes with `why`.
@@ -321,10 +356,14 @@ impl Session {
             REJECT if self.state == State::Connecting => {
                 self.close(&format!("the host turned us away: {}", String::from_utf8_lossy(body)));
             }
-            INPUTS if self.state == State::Playing && body.len() >= 16 => {
+            INPUTS if self.state == State::Playing && body.len() >= 24 => {
                 let word = |i: usize| u32::from_be_bytes(body[i * 4..i * 4 + 4].try_into().unwrap());
                 let (ack, start, cf, cv) = (word(0), word(1), word(2), word(3));
-                let inputs = &body[16..];
+                // (packets can arrive out of order: keep the latest)
+                if word(4) >= self.peer_frame {
+                    (self.peer_frame, self.peer_advantage) = (word(4), word(5) as i32);
+                }
+                let inputs = &body[24..];
                 self.acked = self.acked.max(ack.min(self.local.len() as u32));
                 // Only what follows on from what we have (a gap is sent again).
                 let have = self.remote.len();
@@ -382,64 +421,6 @@ pub fn hash(bytes: &[u8]) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Runs a host and a joiner on localhost until both have played `frames` frames, each
-    /// pressing its own made-up buttons, and returns what each side played.
-    fn play(frames: u32, lose_every: u32, delay: u8) -> (Vec<[u8; 2]>, Vec<[u8; 2]>) {
-        let mut host = Session::host(0, 7, 0xDEAD_BEEF, delay).unwrap();
-        let port = host.port().unwrap();
-        let mut join = Session::join(&format!("127.0.0.1:{port}"), 7).unwrap();
-        host.lose_every = lose_every;
-        join.lose_every = lose_every;
-        let mut played = (vec![], vec![]);
-        let deadline = Instant::now() + Duration::from_secs(20);
-        let mut tick = 0u32;
-        while (played.0.len() as u32) < frames || (played.1.len() as u32) < frames {
-            assert!(Instant::now() < deadline, "stuck at {} / {} frames", played.0.len(), played.1.len());
-            tick += 1;
-            for (s, out, salt) in [(&mut host, &mut played.0, 0x11u32), (&mut join, &mut played.1, 0x5A)] {
-                s.receive();
-                let f = out.len() as u32;
-                if f < frames {
-                    // Buttons that change with time and differ between sides.
-                    let b = (tick.wrapping_mul(2_654_435_761) >> 24) as u8 ^ salt as u8;
-                    if let Some(p) = s.step(f, b) {
-                        out.push(p);
-                        if (f + 1).is_multiple_of(CHECK_EVERY) {
-                            s.check(f + 1, p[0] as u32 * 256 + p[1] as u32 + f);
-                        }
-                    }
-                }
-                s.send();
-                assert!(!matches!(s.state(), State::Closed(_)), "{:?}", s.state());
-            }
-            std::thread::sleep(Duration::from_micros(200));
-        }
-        assert_eq!(join.seed(), 0xDEAD_BEEF);
-        assert_eq!(join.delay(), delay);
-        (played.0, played.1)
-    }
-
-    #[test]
-    fn both_sides_play_the_same_inputs() {
-        let (a, b) = play(600, 0, DEFAULT_DELAY);
-        assert_eq!(a, b);
-        // The first `delay` frames are nothing; after that, each side's own buttons.
-        assert!(a[..3].iter().all(|p| *p == [0, 0]));
-        assert!(a.iter().any(|p| p[0] != 0) && a.iter().any(|p| p[1] != 0));
-    }
-
-    #[test]
-    fn lost_packets_only_cost_time() {
-        let (a, b) = play(600, 3, 2);
-        assert_eq!(a, b);
-    }
-
-    #[test]
-    fn no_delay_still_works() {
-        let (a, b) = play(200, 0, 0);
-        assert_eq!(a, b);
-    }
 
     #[test]
     fn a_different_rom_is_turned_away() {

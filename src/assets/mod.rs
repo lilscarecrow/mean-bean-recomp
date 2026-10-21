@@ -80,6 +80,7 @@ pub trait AssetSource {
 }
 
 /// Assets decoded from the installed ROM (`mbm::rom`).
+#[derive(Clone)]
 pub struct RomAssets {
     rom: &'static [u8],
 }
@@ -115,6 +116,7 @@ impl AssetSource for RomAssets {
 
 /// Video memory as the game fills it: 64 KiB of 4-bit tiles (32 bytes each) and maps.
 /// Art loads at the VRAM addresses the game's loaders use; the renderer reads tiles.
+#[derive(Clone)]
 pub struct Vram(pub Vec<u8>);
 
 impl Default for Vram {

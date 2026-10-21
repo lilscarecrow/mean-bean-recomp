@@ -8,7 +8,8 @@
 //! Not in the ROM: NETWORK on the main menu plays 1P vs 2P with someone on another
 //! machine (see [`bean_machine::netplay`] and [`bean_machine::netmenu`]). One player
 //! hosts, the other types the host's address and connects; both press START in the lobby
-//! and the match starts. Each side plays with either set of keys. From the command line:
+//! and the match starts. Our own buttons count straight away, as offline: the other
+//! player's are guessed until they arrive (see [`bean_machine::rollback`]). Each side plays with either set of keys. From the command line:
 //!   `bean-machine [ROM] --host [PORT]` hosts straight away (port 7845 unless given);
 //!   `bean-machine [ROM] --join IP[:PORT]` joins straight away;
 //!   `--delay FRAMES` sets the host's input delay (3 unless given).
@@ -16,9 +17,10 @@
 use std::path::PathBuf;
 
 use bean_machine::game::{Game, Status};
-use bean_machine::netmenu::{Action, Input, Lobby, NetMenu, Screen};
+use bean_machine::netmenu::{Action, Input, NetMenu, Screen};
 use bean_machine::netplay::{self, Session, State};
 use bean_machine::overlay::{self, Canvas};
+use bean_machine::rollback::{self, Rollback};
 use bean_machine::{pad, render, rom};
 use bevy::asset::RenderAssetUsages;
 use bevy::image::ImageSampler;
@@ -61,16 +63,17 @@ struct Front {
 /// A connection, and once it's up, the lobby and then the match.
 struct Online {
     session: Session,
-    /// The next frame to play (the lobby's frames count too).
-    frame: u32,
-    lobby: Lobby,
-    game: Option<Game>,
-    linger: u32,
+    play: Option<Rollback<rollback::Online>>,
 }
 
 impl Online {
     fn new(session: Session) -> Online {
-        Online { session, frame: 0, lobby: Lobby::default(), game: None, linger: 0 }
+        Online { session, play: None }
+    }
+
+    /// The lobby or match as it stands, while connected.
+    fn shown(&self) -> Option<&rollback::Online> {
+        self.play.as_ref().filter(|_| *self.session.state() == State::Playing).map(Rollback::state)
     }
 }
 
@@ -275,43 +278,17 @@ fn step(keys: Res<ButtonInput<KeyCode>>, mut front: ResMut<Front>, mut windows: 
     set_title(front, &mut windows);
 }
 
-/// Plays the next frame over the network once the other side's buttons for it are
-/// here, and a second one when they're ahead of us: the lobby until both are ready,
-/// then the match.
+/// The next frame over the network: the lobby until both are ready, then the match.
+/// Once connected, the match's start (1P vs 2P from the host's seed) is made first.
 fn play_online(net: &mut Online, mine: u8) {
-    for _ in 0..2 {
-        let Some(both) = net.session.step(net.frame, mine) else { break };
-        net.frame += 1;
-        match net.game.as_mut() {
-            None => {
-                if net.lobby.step(both) {
-                    match Game::versus(net.session.seed()) {
-                        Ok(g) => net.game = Some(g),
-                        Err(e) => return net.session.leave(&e),
-                    }
-                }
-            }
-            Some(g) => {
-                g.frame(both);
-                if let Status::Stopped(_) = g.status {
-                    // Something not ported yet: say so for a second, then back to the
-                    // lobby (on both sides: they stop on the same frame).
-                    net.linger += 1;
-                    if net.linger > 60 {
-                        net.game = None;
-                        net.lobby = Lobby::default();
-                        net.linger = 0;
-                    }
-                }
-            }
+    if net.play.is_none() {
+        match Game::versus(net.session.seed()) {
+            Ok(g) => net.play = Some(Rollback::new(rollback::Online::new(g))),
+            Err(e) => return net.session.leave(&e),
         }
-        if net.frame.is_multiple_of(netplay::CHECK_EVERY) {
-            let sum = net.game.as_ref().map_or(net.lobby.checksum(), Game::checksum);
-            net.session.check(net.frame, sum);
-        }
-        if !net.session.behind(net.frame) {
-            break;
-        }
+    }
+    if let Some(play) = net.play.as_mut() {
+        play.tick(&mut net.session, mine);
     }
 }
 
@@ -422,15 +399,15 @@ fn ui(
 }
 
 fn show(front: Res<Front>, mut images: ResMut<Assets<Image>>) {
-    let online = front.net.as_ref().filter(|n| *n.session.state() == State::Playing);
-    let mut picture = match online.and_then(|n| n.game.as_ref()) {
+    let online = front.net.as_ref().and_then(|n| Some((n, n.shown()?)));
+    let mut picture = match online.and_then(|(_, o)| o.game.as_ref()) {
         Some(g) => g.picture(),
         None => front.game.picture(),
     };
-    if let Some(net) = online {
-        if net.game.is_none() {
+    if let Some((net, o)) = online {
+        if o.game.is_none() {
             let peer = net.session.peer().map(|p| p.ip().to_string()).unwrap_or_default();
-            net.lobby.draw(&mut picture, net.session.side(), &peer);
+            o.lobby.draw(&mut picture, net.session.side(), &peer);
         }
     } else if front.menu_open {
         front.menu.draw(&mut picture, front.ticks);
@@ -445,13 +422,13 @@ fn show(front: Res<Front>, mut images: ResMut<Assets<Image>>) {
 
 /// The window title: the game's, who we're playing, and anything not ported yet.
 fn set_title(front: &mut Front, windows: &mut Query<&mut Window>) {
-    let online = front.net.as_ref().filter(|n| *n.session.state() == State::Playing);
+    let online = front.net.as_ref().and_then(|n| Some((n, n.shown()?)));
     let mut title = TITLE.to_string();
     let mut game = &front.game;
-    if let Some(net) = online {
+    if let Some((net, o)) = online {
         let peer = net.session.peer().map(|p| p.to_string()).unwrap_or_default();
         title = format!("{title} (network: player {} with {peer})", net.session.side() + 1);
-        match &net.game {
+        match &o.game {
             Some(g) => game = g,
             None => return set(front, windows, title),
         }

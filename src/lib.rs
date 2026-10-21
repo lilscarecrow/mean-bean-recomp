@@ -21,6 +21,7 @@ pub mod overlay;
 pub mod pad;
 pub mod pair;
 pub mod render;
+pub mod rollback;
 pub mod rng;
 pub mod rom;
 

@@ -83,6 +83,7 @@ pub enum Status {
     Stopped(String),
 }
 
+#[derive(Clone)]
 pub struct Game {
     pub engine: Engine,
     pub status: Status,
