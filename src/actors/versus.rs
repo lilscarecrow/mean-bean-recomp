@@ -167,7 +167,8 @@ pub enum VsState {
     NextGo,
     /// $7FFA: the match is over: $80 frames, then $7FFE the countdown, $8020 the
     /// blinking prompt, $802A until START or the countdown runs out (with
-    /// `wait_to_continue`, not in the ROM: no countdown, until START).
+    /// `wait_to_continue`, not in the ROM: no countdown, until both press START; the
+    /// same between rounds).
     OverWait,
     Countdown,
     Prompt,
@@ -301,6 +302,20 @@ impl Engine {
                 }
             }
         }
+    }
+
+    /// Not in the ROM (`wait_to_continue`): true once both players have pressed START
+    /// since the wait began.
+    fn both_started(&mut self, inputs: &Inputs) -> bool {
+        let ready = self.continue_ready.get_or_insert([false; 2]);
+        for (r, pad) in ready.iter_mut().zip(&inputs.pads) {
+            *r |= pad.press & 0x80 != 0;
+        }
+        if *ready == [true, true] {
+            self.continue_ready = None;
+            return true;
+        }
+        false
     }
 
     /// `sub_3F94` (VS): the selector, its face and marker.
@@ -560,7 +575,8 @@ impl Engine {
                 }
             }
             NextWait => {
-                if bookmark_ctrl(&mut p.delay, any_press) {
+                let go = if self.wait_to_continue { self.both_started(inputs) } else { bookmark_ctrl(&mut p.delay, any_press) };
+                if go {
                     next(p, NextGo);
                 }
             }
@@ -595,7 +611,8 @@ impl Engine {
             }
             Continue => {
                 let press = inputs.pads[usize::from((p.id ^ self.swap_controls) & 1)].press;
-                if press & 0x80 != 0 {
+                let again = if self.wait_to_continue { self.both_started(inputs) } else { press & 0x80 != 0 };
+                if again {
                     // loc_80B8: play again.
                     self.bytecode_disabled = false;
                     self.bytecode_flag = 0;

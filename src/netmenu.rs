@@ -292,6 +292,22 @@ impl Lobby {
     }
 }
 
+/// Where [`draw_ready`] goes: a strip along the bottom of the picture.
+pub const READY_STRIP: Rect = Rect { x: 50, y: 207, w: 220, h: 15 };
+
+/// Between rounds and after a match (network games wait for both players' START): who
+/// has pressed it. `side` is ours.
+pub fn draw_ready(picture: &mut [u8], ready: [bool; 2], side: usize) {
+    let mut c = Canvas(picture);
+    c.panel(READY_STRIP);
+    let half = READY_STRIP.w / 2;
+    for (p, &r) in ready.iter().enumerate() {
+        let you = if p == side { ">" } else { "" };
+        let (text, color) = if r { (format!("{you}P{} READY!", p + 1), overlay::GREEN) } else { (format!("{you}P{} PRESS START", p + 1), overlay::YELLOW) };
+        c.text_centered(READY_STRIP.x + half / 2 + p as i32 * half, READY_STRIP.y + 4, &text, color, 1);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -1306,9 +1306,11 @@ pub struct Engine {
     /// leaving the menu. Off unless the front end turns it on.
     pub network_line: bool,
     pub network_chosen: bool,
-    /// Not in the ROM: at the end of a 1P vs 2P match, the loser's "PRESS START" waits
-    /// for START instead of counting down to the high scores (network games).
+    /// Not in the ROM (network games): between 1P vs 2P rounds and at the end of a
+    /// match, wait for both players to press START (no countdown to the high scores,
+    /// no button skipping ahead). `continue_ready` is who has, while waiting.
     pub wait_to_continue: bool,
+    pub continue_ready: Option<[bool; 2]>,
     /// `plane_a_buffer` ($700 words) and `use_plane_a_buffer`: while set, the vertical
     /// blank copies the buffer to plane A ($C000).
     pub plane_a_buffer: Vec<u16>,
@@ -1426,6 +1428,7 @@ impl Engine {
             network_line: false,
             network_chosen: false,
             wait_to_continue: false,
+            continue_ready: None,
             plane_a_buffer: vec![0; 0x700],
             use_plane_a_buffer: false,
             misc_buffer: vec![],

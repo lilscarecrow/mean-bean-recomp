@@ -443,9 +443,16 @@ fn show(front: Res<Front>, mut images: ResMut<Assets<Image>>) {
         None => front.game.picture(),
     };
     if let Some((net, o)) = online {
-        if o.game.is_none() {
-            let peer = net.session.peer().map(|p| p.ip().to_string()).unwrap_or_default();
-            o.lobby.draw(&mut picture, net.session.side(), &peer);
+        match &o.game {
+            None => {
+                let peer = net.session.peer().map(|p| p.ip().to_string()).unwrap_or_default();
+                o.lobby.draw(&mut picture, net.session.side(), &peer);
+            }
+            Some(g) => {
+                if let Some(ready) = g.engine.continue_ready {
+                    bean_machine::netmenu::draw_ready(&mut picture, ready, net.session.side());
+                }
+            }
         }
     } else if front.menu_open {
         front.menu.draw(&mut picture, front.ticks);
