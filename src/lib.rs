@@ -11,6 +11,7 @@ pub mod actors;
 pub mod ai;
 pub mod anim;
 pub mod assets;
+pub mod audio;
 pub mod bean_order;
 pub mod field;
 pub mod game;
