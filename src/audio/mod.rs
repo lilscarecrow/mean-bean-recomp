@@ -38,10 +38,12 @@ pub const FM_HZ: f64 = MASTER_HZ / FM_SAMPLE as f64;
 const VBLANK_AT: u64 = 100_000;
 /// When the boot code loads and starts the driver (`InitSound`): power-on frame 8.
 const BOOT_AT: u64 = 8 * FRAME_CLOCKS + 830_000;
-/// The Z80's time for a tick or command: a base and a time per chip write (with the
-/// YM2612 busy waits), fitted to recordings.
+/// The Z80's time for a tick (a base and a time per chip write: its channels' work
+/// between the writes) and for a command (per write: mostly patches, a song's start
+/// about 616k clocks for 163), fitted to recordings.
 const EVENT_BASE: u64 = 30_000;
 const PER_WRITE: u64 = 7_500;
+const PER_COMMAND_WRITE: u64 = 3_780;
 /// A turn of the main loop: with a sample byte, 203 + 13n Z80 cycles; without, about
 /// 121 + 13n (`n` the delay count).
 const LOOP_DAC: u64 = 3045;
@@ -158,12 +160,20 @@ impl Audio {
         }
     }
 
-    /// The driver's writes since the last call, timed from `t` on (one per `PER_WRITE`);
-    /// the time they took.
+    /// A tick's writes since the last call, timed from `t` on; the time they took.
     fn take_writes(&mut self, t: u64) -> u64 {
+        self.take_writes_at(t, PER_WRITE, EVENT_BASE)
+    }
+
+    /// A command's.
+    fn take_command_writes(&mut self, t: u64) -> u64 {
+        self.take_writes_at(t, PER_COMMAND_WRITE, 0)
+    }
+
+    fn take_writes_at(&mut self, t: u64, per: u64, base: u64) -> u64 {
         let w = std::mem::take(&mut self.cube.writes);
         for (i, &w) in w.iter().enumerate() {
-            let at = t + i as u64 * PER_WRITE;
+            let at = t + i as u64 * per;
             if let Write::Fm { part: 0, reg, data } = w {
                 if reg == 0x26 {
                     self.tb = data;
@@ -175,7 +185,7 @@ impl Audio {
             }
             self.writes.push_back((at, w));
         }
-        if w.is_empty() { 0 } else { EVENT_BASE + PER_WRITE * w.len() as u64 }
+        if w.is_empty() { 0 } else { base + per * w.len() as u64 }
     }
 
     /// One turn of the Z80's main loop (`$0023`), or its wait in a pause (until `until`).
@@ -184,14 +194,14 @@ impl Audio {
             // ($0000: the variables, song $20)
             self.started = true;
             self.cube.reset();
-            let t = self.take_writes(self.z80);
+            let t = self.take_command_writes(self.z80);
             self.z80 += t;
             return;
         }
         if self.cube.paused {
             if self.cube.ram[usize::from(cube::MAILBOX)] != 0 {
                 self.cube.command();
-                let t = self.take_writes(self.z80);
+                let t = self.take_command_writes(self.z80);
                 self.z80 += t.max(LOOP_IDLE);
             } else {
                 self.z80 = until;
@@ -212,7 +222,7 @@ impl Audio {
         // $0034: the mailbox, the sample request, a byte to the DAC.
         if self.cube.ram[usize::from(cube::MAILBOX)] != 0 {
             self.cube.command();
-            let t = self.take_writes(self.z80);
+            let t = self.take_command_writes(self.z80);
             self.z80 += t;
             if self.cube.paused {
                 return;
