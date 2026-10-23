@@ -127,7 +127,7 @@ fn sprite_mappings_match_draw_actors() {
         return;
     }
     let rom = Rom(bean_machine::rom::get().unwrap());
-    let (mut frames_checked, mut sprites_checked, mut skipped) = (0, 0, 0);
+    let (mut frames_checked, mut sprites_checked, mut skipped, mut unlinked) = (0, 0, 0, 0);
     for path in support::recordings() {
         for ram in support::frames(&path) {
             let count = usize::from(ram.u16(0xFF_0DE4) / 4);
@@ -177,11 +177,20 @@ fn sprite_mappings_match_draw_actors() {
                 })
                 .collect();
             assert_eq!(ours, rom_sprites, "{} ({} sprites)", path.display(), count - 1);
+            // SetSpriteLinks: the chain the VDP follows from the dummy entry.
+            let mut links = vec![];
+            let mut link = ram.u8(0xFF_0E86 + 3);
+            while link != 0 && links.len() < count {
+                links.push(usize::from(link));
+                link = ram.u8(0xFF_0E86 + u32::from(link) * 8 + 3);
+            }
+            assert_eq!(sprites::chain(&ours), links, "{}: sprite links", path.display());
+            unlinked += ours.len() - links.len();
             frames_checked += 1;
             sprites_checked += ours.len();
         }
     }
-    eprintln!("{frames_checked} frames, {sprites_checked} sprites identical to DrawActors ({skipped} frames drew nothing)");
+    eprintln!("{frames_checked} frames, {sprites_checked} sprites identical to DrawActors, {unlinked} left unlinked ({skipped} frames drew nothing)");
 }
 
 /// Palettes: during a match, while no fade is running, palette lines 0-2 in RAM are

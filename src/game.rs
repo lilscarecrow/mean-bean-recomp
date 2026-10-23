@@ -325,8 +325,7 @@ impl Game {
                 list.push(s);
             }
         }
-        let mut chain: Vec<usize> = (1..=list.len()).collect();
-        chain.sort_by_key(|&i| (list[i - 1].layer, i));
+        let chain = sprites::chain(&list);
         let base = self.layout().sprites;
         let entry = |vram: &mut Vram, i: usize, y: u16, size: u8, link: u8, tile: u16, x: u16| {
             let at = base + i as u16 * 8;
@@ -334,6 +333,10 @@ impl Game {
         };
         let first = chain.first().copied().unwrap_or(0) as u8;
         entry(&mut self.vram, 0, 0, 0, first, 0, 0);
+        // (unlinked pieces: in the table, never shown)
+        for (i, s) in list.iter().enumerate().filter(|(i, _)| !chain.contains(&(i + 1))) {
+            entry(&mut self.vram, i + 1, s.y, s.size, 0, s.tile, s.x);
+        }
         for (k, &i) in chain.iter().enumerate() {
             let s = list[i - 1];
             let link = chain.get(k + 1).copied().unwrap_or(0) as u8;
@@ -360,7 +363,7 @@ impl Game {
                 Some(pieces) => sprites::place_pieces(pieces.clone(), d.x, d.y, vscroll),
                 None => sprites::place(&self.rom, d.mappings, d.frame, d.x, d.y, vscroll),
             };
-            for s in placed {
+            for s in placed.into_iter().filter(|s| s.layer < sprites::LAYERS) {
                 let (w, h) = (usize::from((s.size >> 2) & 3) + 1, usize::from(s.size & 3) + 1);
                 let (first, last) = (s.tile & 0x7FF, (s.tile & 0x7FF) + (w * h) as u16 - 1);
                 let (x, y) = (usize::from(s.x & 0x1FF).wrapping_sub(128), usize::from(s.y & 0x1FF).wrapping_sub(128));

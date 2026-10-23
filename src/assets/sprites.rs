@@ -12,6 +12,8 @@ use super::Rom;
 pub const MAPPINGS_TABLE: u32 = 0x13940;
 /// `DrawActors` stops at this many hardware sprites (the first is a dummy).
 pub const MAX_SPRITES: usize = 0x50;
+/// `SetSpriteLinks` links layers 0-4.
+pub const LAYERS: u8 = 5;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Piece {
@@ -43,6 +45,17 @@ pub struct Sprite {
     pub size: u8,
     pub layer: u8,
     pub tile: u16,
+}
+
+/// `SetSpriteLinks`: the order the VDP draws `sprites` (table entries 1.., after the
+/// dummy entry 0) in, the first in front: layer 0's in table order, then layer 1's, ...
+/// A piece on any other layer is in the table but linked from nowhere, so never shown:
+/// frame $1A of mapping list 6 (a single landed garbage bean) claims two pieces but has
+/// one, and the second is the next frame's header (layer $FE, tile $0503: score font).
+pub fn chain(sprites: &[Sprite]) -> Vec<usize> {
+    let mut chain: Vec<usize> = (1..=sprites.len()).filter(|&i| sprites[i - 1].layer < LAYERS).collect();
+    chain.sort_by_key(|&i| (sprites[i - 1].layer, i));
+    chain
 }
 
 /// The pieces of frame `frame` of mapping list `mappings`.
