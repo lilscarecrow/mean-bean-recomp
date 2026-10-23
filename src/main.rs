@@ -159,6 +159,7 @@ fn main() {
         .insert_resource(Time::<Fixed>::from_hz(60.0))
         .insert_resource(Settings { port: args.host.unwrap_or(netplay::DEFAULT_PORT), delay: args.delay.unwrap_or(netplay::DEFAULT_DELAY) })
         .insert_resource(Start(start))
+        .insert_resource(Glitch { log: std::env::var_os("MBM_GLITCH_LOG").is_some(), last: vec![], shots: 0 })
         .add_audio_source::<Speaker>()
         .add_systems(Startup, setup)
         .add_systems(FixedUpdate, step)
@@ -529,12 +530,50 @@ fn ui(
     }
 }
 
-fn show(front: Res<Front>, mut images: ResMut<Assets<Image>>) {
+/// Debugging: with `MBM_GLITCH_LOG` set, says what draws the score's font inside a
+/// playfield (and saves the picture) whenever that starts or changes; F9 saves the
+/// picture any time. Pictures go to `capture-N.ppm` in the current directory.
+#[derive(Resource)]
+struct Glitch {
+    log: bool,
+    last: Vec<String>,
+    shots: u32,
+}
+
+impl Glitch {
+    fn save(&mut self, picture: &[u8]) -> String {
+        self.shots += 1;
+        let name = format!("capture-{}.ppm", self.shots);
+        let mut ppm = format!("P6 {} {} 255\n", render::WIDTH, render::HEIGHT).into_bytes();
+        for px in picture.chunks(4) {
+            ppm.extend_from_slice(&px[..3]);
+        }
+        match std::fs::write(&name, ppm) {
+            Ok(()) => name,
+            Err(e) => format!("(couldn't save {name}: {e})"),
+        }
+    }
+}
+
+fn show(front: Res<Front>, mut images: ResMut<Assets<Image>>, mut glitch: ResMut<Glitch>, keys: Res<ButtonInput<KeyCode>>) {
     let online = front.net.as_ref().and_then(|n| Some((n, n.shown()?)));
-    let mut picture = match online.and_then(|(_, o)| o.game.as_ref()) {
-        Some(g) => g.picture(),
-        None => front.game.picture(),
-    };
+    let game = online.and_then(|(_, o)| o.game.as_ref()).unwrap_or(&front.game);
+    let mut picture = game.picture();
+    if glitch.log {
+        let report = game.font_in_fields();
+        if !report.is_empty() && report != glitch.last {
+            let shot = glitch.save(&picture);
+            eprintln!("font in a playfield ({shot}):");
+            for line in &report {
+                eprintln!("  {line}");
+            }
+        }
+        glitch.last = report;
+    }
+    if keys.just_pressed(KeyCode::F9) {
+        let shot = glitch.save(&picture);
+        eprintln!("saved {shot}");
+    }
     if let Some((net, o)) = online {
         match &o.game {
             None => {

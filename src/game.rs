@@ -341,6 +341,57 @@ impl Game {
         }
     }
 
+    /// Debugging (not in the ROM): what shows the score's font (tiles $500-$5FF, where
+    /// the match screen keeps it) inside a playfield this frame: hardware sprites, with
+    /// the actor they're from, and plane cells. Nothing in a match should; empty when
+    /// nothing does.
+    pub fn font_in_fields(&self) -> Vec<String> {
+        const FONT: std::ops::Range<u16> = 0x500..0x600;
+        let fields = planes::FIELD_ORIGIN.map(|o| {
+            let (col, row) = (usize::from(o & 0x7F) / 2, usize::from((o - 0xC000) / planes::ROW_BYTES));
+            (col * 8, row * 8, 6 * 16, 12 * 16)
+        });
+        let in_fields = |x: usize, y: usize, w: usize, h: usize| fields.iter().any(|&(fx, fy, fw, fh)| x < fx + fw && fx < x + w && y < fy + fh && fy < y + h);
+        let mut out = vec![];
+        let vscroll = self.engine.vscroll[0];
+        for slot in 0..SLOTS {
+            let Some(d) = self.engine.draw_of(slot).filter(|d| d.shown() && self.engine.awake(slot)) else { continue };
+            let placed = match self.engine.line_maps.get(usize::from(d.frame)).filter(|_| d.mappings == 7) {
+                Some(pieces) => sprites::place_pieces(pieces.clone(), d.x, d.y, vscroll),
+                None => sprites::place(&self.rom, d.mappings, d.frame, d.x, d.y, vscroll),
+            };
+            for s in placed {
+                let (w, h) = (usize::from((s.size >> 2) & 3) + 1, usize::from(s.size & 3) + 1);
+                let (first, last) = (s.tile & 0x7FF, (s.tile & 0x7FF) + (w * h) as u16 - 1);
+                let (x, y) = (usize::from(s.x & 0x1FF).wrapping_sub(128), usize::from(s.y & 0x1FF).wrapping_sub(128));
+                if first < FONT.end && last >= FONT.start && in_fields(x, y, w * 8, h * 8) {
+                    let name = self.engine.slots[slot].as_ref().map(|a| format!("{a:?}")).unwrap_or_default();
+                    let name = name.split(['(', ' ', '{']).next().unwrap_or("");
+                    out.push(format!(
+                        "sprite: slot {slot} {name}, mappings ${:02X} frame ${:02X} at ({:X}, {:X}), flags ${:02X}: piece {w}x{h} at screen ({x}, {y}), pattern ${:04X}",
+                        d.mappings, d.frame, d.x, d.y, d.flags, s.tile
+                    ));
+                }
+            }
+        }
+        let layout = self.layout();
+        let mut seen = std::collections::HashSet::new();
+        for &(fx, fy, fw, fh) in &fields {
+            for y in (fy..fy + fh).step_by(8) {
+                for x in (fx..fx + fw).step_by(8) {
+                    for plane in 0..2 {
+                        let (at, word, _, _) = render::plane_entry(&layout, &self.vram.0, &self.vsram, plane, x + 4, y + 4);
+                        if FONT.contains(&(word & 0x7FF)) && seen.insert(at) {
+                            let vs = self.vsram.get((x / 16) * 2 + plane).copied().unwrap_or(0);
+                            out.push(format!("plane {}: screen ({x}, {y}) shows ${at:04X} = ${word:04X} (vscroll ${vs:04X})", if plane == 0 { 'A' } else { 'B' }));
+                        }
+                    }
+                }
+            }
+        }
+        out
+    }
+
     /// The picture as RGBA (320 x 224).
     pub fn picture(&self) -> Vec<u8> {
         let pixels = render::render(&self.layout(), &self.vram.0, &self.cram, &self.vsram);

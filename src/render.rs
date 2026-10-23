@@ -101,25 +101,30 @@ fn word(vram: &[u8], at: usize) -> u16 {
     u16::from_be_bytes([vram[at & 0xFFFF], vram[(at + 1) & 0xFFFF]])
 }
 
+/// The plane cell that screen pixel (x, y) shows of `plane` (0 A, 1 B): its VRAM
+/// address and pattern word, and the pixel's place in the plane.
+pub fn plane_entry(layout: &Layout, vram: &[u8], vsram: &[u16], plane: usize, x: usize, y: usize) -> (usize, u16, usize, usize) {
+    let (pw, ph) = (usize::from(layout.plane_width), usize::from(layout.plane_height));
+    let entry = match layout.hscroll_mode {
+        3 => y,
+        2 => y & !7,
+        _ => 0,
+    };
+    let hscroll = word(vram, usize::from(layout.hscroll) + entry * 4 + plane * 2) & 0x3FF;
+    let base = usize::from(if plane == 0 { layout.plane_a } else { layout.plane_b });
+    let column = if layout.column_vscroll { (x / 16) * 2 } else { 0 };
+    let vs = usize::from(vsram.get(column + plane).copied().unwrap_or(0) & 0x3FF);
+    let px = (x + 0x400 - usize::from(hscroll)) % (pw * 8);
+    let py = (y + vs) % (ph * 8);
+    let at = (base + ((py / 8) * pw + px / 8) * 2) & 0xFFFF;
+    (at, word(vram, at), px, py)
+}
+
 /// Renders a frame: `vram`, the 64 CRAM colors, and `vsram` (2 words per 2-cell column:
 /// plane A then B; or the first two for whole planes).
 pub fn render(layout: &Layout, vram: &[u8], cram: &[u16; 64], vsram: &[u16]) -> Vec<Pixel> {
-    let (pw, ph) = (usize::from(layout.plane_width), usize::from(layout.plane_height));
-    let hscroll = |plane: usize, y: usize| {
-        let entry = match layout.hscroll_mode {
-            3 => y,
-            2 => y & !7,
-            _ => 0,
-        };
-        word(vram, usize::from(layout.hscroll) + entry * 4 + plane * 2) & 0x3FF
-    };
     let plane_cell = |plane: usize, x: usize, y: usize| -> Cell {
-        let base = usize::from(if plane == 0 { layout.plane_a } else { layout.plane_b });
-        let column = if layout.column_vscroll { (x / 16) * 2 } else { 0 };
-        let vs = usize::from(vsram.get(column + plane).copied().unwrap_or(0) & 0x3FF);
-        let px = (x + 0x400 - usize::from(hscroll(plane, y))) % (pw * 8);
-        let py = (y + vs) % (ph * 8);
-        let w = word(vram, base + ((py / 8) * pw + px / 8) * 2);
+        let (_, w, px, py) = plane_entry(layout, vram, vsram, plane, x, y);
         Cell { index: pattern_pixel(vram, w, px % 8, py % 8), line: ((w >> 13) & 3) as u8, priority: w & 0x8000 != 0 }
     };
     // The sprite table in link order (the first drawn is in front).
