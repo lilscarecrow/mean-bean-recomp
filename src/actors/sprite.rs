@@ -70,6 +70,7 @@ impl Engine {
             Actor::Special(s) => d(s.draw, s.mappings, s.anim.frame, hi(s.motion.x), hi(s.motion.y)),
             Actor::Debris(b) => d(0x83, b.color, b.anim.frame, hi(b.motion.x), hi(b.motion.y)),
             Actor::RefereeThrow(t) => d(t.draw, 0, t.anim.frame, hi(t.motion.x), hi(t.motion.y)),
+            Actor::PauseSign(s) => d(s.draw, if s.started { 6 } else { 0 }, if s.started { 0x20 + s.side } else { 0 }, s.x, s.y),
             Actor::VsCast(c) => match c {
                 VsCast::Cheer { draw, mappings, x, y, anim, .. } => d(*draw, *mappings, anim.frame, *x, *y),
                 VsCast::Orbit { draw, mappings, x, y, anim, .. } => d(*draw, *mappings, anim.frame, *x, *y),

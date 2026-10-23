@@ -26,6 +26,8 @@ mod tutorial;
 mod versus;
 mod exercise;
 mod special;
+mod pause;
+mod soundtest;
 mod credits;
 mod ending;
 mod epilogue;
@@ -51,6 +53,8 @@ pub use tutorial::*;
 pub use versus::*;
 pub use exercise::*;
 pub use special::*;
+pub use pause::*;
+pub use soundtest::*;
 pub use credits::*;
 pub use ending::*;
 pub use epilogue::*;
@@ -238,6 +242,9 @@ pub enum Actor {
     Debris(Debris),
     FieldShake(FieldShake),
     RefereeThrow(RefereeThrow),
+    PauseSign(PauseSign),
+    RefereePause(RefereePause),
+    SoundTest(SoundTest),
     LessonHelper(LessonHelper),
     LessonText(LessonText),
     LessonPad(LessonPad),
@@ -387,6 +394,9 @@ impl Actor {
             Actor::Debris(_) => Some(DEBRIS_CODE),
             Actor::FieldShake(_) => Some(FIELD_SHAKE_CODE),
             Actor::RefereeThrow(t) => Some(t.code()),
+            Actor::PauseSign(s) => Some(if s.started { PAUSE_SIGN_UPDATE_CODE } else { PAUSE_SIGN_CODE }),
+            Actor::RefereePause(_) => Some(REFEREE_PAUSE_CODE),
+            Actor::SoundTest(t) => Some(if t.started { SOUND_TEST_UPDATE_CODE } else { SOUND_TEST_CODE }),
             Actor::LessonText(_) => Some(0xFFBE),
             Actor::LessonPad(p) => Some(p.code()),
             Actor::CoinSign => Some(0xDE0E),
@@ -1338,6 +1348,12 @@ pub struct Engine {
     pub vs_levels: [u16; 2],
     /// Exercise mode: `byte_FF1965`, a bit per side that has sat out its wait.
     pub ex_out: u8,
+    /// Pause: the presses `ReadCtrls` left for the next `CheckPause`, `p1_paused` ($80:
+    /// pad 2 paused), and where `CheckPause` goes on after waiting for a vertical blank
+    /// (the side to check next and its presses).
+    pub pause_press: [u8; 2],
+    pub p1_paused: u8,
+    pub pause_next: Option<(usize, u8)>,
 }
 
 impl Engine {
@@ -1442,6 +1458,9 @@ impl Engine {
             vs_left: [0; 2],
             vs_levels: [0; 2],
             ex_out: 0,
+            pause_press: [0; 2],
+            p1_paused: 0,
+            pause_next: None,
             actors_derailed: false,
             unported_extra: None,
             dma_queue: vec![],
@@ -1553,6 +1572,9 @@ impl Engine {
 
     /// A frame's logic after its vertical blank: the game flow, then the actors.
     pub fn logic(&mut self, inputs: &Inputs) -> Result<(), Unported> {
+        if self.check_pause() {
+            return Ok(()); // (VSync: the rest comes next frame)
+        }
         self.run_bytecode(inputs)?;
         self.deferred_vblanks += std::mem::take(&mut self.deferred_tail);
         self.long_step();
@@ -1632,6 +1654,10 @@ impl Engine {
                 (0..n).for_each(|_| {
                     self.rng.next();
                 });
+            }
+            // (a paused side's actors don't run: RunActors' tag mask)
+            if !self.awake(slot) {
+                continue;
             }
             self.current_slot = slot;
             // Leave a placeholder so the running actor's slot still counts as used.
@@ -1718,6 +1744,9 @@ impl Engine {
                 Actor::Debris(d) => self.run_debris(d).map(Actor::Debris),
                 Actor::FieldShake(f) => self.run_field_shake(f).map(Actor::FieldShake),
                 Actor::RefereeThrow(t) => self.run_referee_throw(t).map(Actor::RefereeThrow),
+                Actor::PauseSign(s) => self.run_pause_sign(s).map(Actor::PauseSign),
+                Actor::RefereePause(p) => self.run_referee_pause(p).map(Actor::RefereePause),
+                Actor::SoundTest(t) => self.run_sound_test(t, inputs).map(Actor::SoundTest),
                 Actor::LessonText(t) => self.run_lesson_text(t).map(Actor::LessonText),
                 Actor::LessonPad(p) => self.run_lesson_pad(p).map(Actor::LessonPad),
                 Actor::CoinSign => None,

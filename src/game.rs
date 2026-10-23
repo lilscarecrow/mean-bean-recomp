@@ -15,7 +15,7 @@ use super::sound::Sound;
 /// Brings `vram` up to date with what the engine did since the last call: its plane
 /// writes and, in order among them, the flow's art loads and plane lists.
 /// `boxes` is `plane_a_buffer` (what the intro's text box covers).
-pub fn apply_vdp(e: &mut Engine, vram: &mut Vram, boxes: &mut Vec<u16>, rom: &Rom, src: &dyn AssetSource) -> Result<(), String> {
+pub fn apply_vdp(e: &mut Engine, vram: &mut Vram, boxes: &mut Vec<Vec<u16>>, rom: &Rom, src: &dyn AssetSource) -> Result<(), String> {
     let writes: Vec<(u16, u16)> = e.plane_writes.drain(..).collect();
     let mut done = 0;
     for ev in std::mem::take(&mut e.vdp_events) {
@@ -41,7 +41,11 @@ pub fn apply_vdp(e: &mut Engine, vram: &mut Vram, boxes: &mut Vec<u16>, rom: &Ro
                 let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_be_bytes()).collect();
                 vram.load(at, &bytes);
             }
-            VdpOp::SaveBox { at, cols, rows, row } => {
+            VdpOp::SaveBox { at, cols, rows, row, buffer } => {
+                if boxes.len() <= usize::from(buffer) {
+                    boxes.resize(usize::from(buffer) + 1, vec![]);
+                }
+                let boxes = &mut boxes[usize::from(buffer)];
                 boxes.clear();
                 for r in 0..rows {
                     for c in 0..cols {
@@ -50,7 +54,8 @@ pub fn apply_vdp(e: &mut Engine, vram: &mut Vram, boxes: &mut Vec<u16>, rom: &Ro
                     }
                 }
             }
-            VdpOp::RestoreBox { at, cols, rows, row } => {
+            VdpOp::RestoreBox { at, cols, rows, row, buffer } => {
+                let boxes = boxes.get(usize::from(buffer)).cloned().unwrap_or_default();
                 for r in 0..rows {
                     for c in 0..cols {
                         let w = boxes.get(usize::from(r * cols + c)).copied().unwrap_or(0);
@@ -92,7 +97,7 @@ pub struct Game {
     rom: Rom<'static>,
     src: RomAssets,
     vram: Vram,
-    boxes: Vec<u16>,
+    boxes: Vec<Vec<u16>>,
     pads: [Pad; 2],
     /// `draw_order`: DrawActors walks the slots forwards and backwards on alternate frames.
     backwards: bool,
@@ -303,6 +308,10 @@ impl Game {
         let vscroll = self.engine.vscroll[0];
         self.backwards = !self.backwards;
         'slots: for slot in order {
+            // (a paused side's actors aren't drawn)
+            if !self.engine.awake(slot) {
+                continue;
+            }
             let Some(d) = self.engine.draw_of(slot).filter(|d| d.shown()) else { continue };
             // (mapping list 7's frames are the epilogue's lines, built in RAM)
             let placed = match self.engine.line_maps.get(usize::from(d.frame)).filter(|_| d.mappings == 7) {

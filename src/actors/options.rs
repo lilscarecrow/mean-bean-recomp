@@ -45,6 +45,13 @@ const OPT_P1_KEYS: usize = 2;
 const OPT_P2_KEYS: usize = 5;
 const OPT_NO_SAMPLES: usize = 8;
 
+/// What a pad picked on the options screen (`.Select`).
+enum Picked {
+    Nothing,
+    InputTest,
+    SoundTest,
+}
+
 impl Engine {
     pub(super) fn run_options_routine(&mut self, at: u32) -> bool {
         match at {
@@ -88,11 +95,19 @@ impl Engine {
                     return None;
                 }
                 for pad in 0..2 {
-                    if self.options_ctrl(&mut o, pad, inputs.pads[pad].press) {
-                        // .InputTest
-                        self.options_strings(1);
-                        o.phase = 2;
-                        break;
+                    match self.options_ctrl(&mut o, pad, inputs.pads[pad].press) {
+                        Picked::InputTest => {
+                            self.options_strings(1);
+                            o.phase = 2;
+                            break;
+                        }
+                        Picked::SoundTest => {
+                            self.use_plane_a_buffer = false;
+                            self.bytecode_flag = 1;
+                            self.bytecode_disabled = false;
+                            return None;
+                        }
+                        Picked::Nothing => {}
                     }
                 }
             }
@@ -108,8 +123,8 @@ impl Engine {
         Some(o)
     }
 
-    /// `OptionsCtrl`: true when it opened the input test.
-    fn options_ctrl(&mut self, o: &mut Options, pad: usize, press: u8) -> bool {
+    /// `OptionsCtrl`: what it picked, if anything.
+    fn options_ctrl(&mut self, o: &mut Options, pad: usize, press: u8) -> Picked {
         let last = if usize::from(self.swap_controls) == pad { if self.sound_test != 0 { 7 } else { 6 } } else { 2 };
         let cursor = &mut o.cursors[pad];
         if press & 1 != 0 {
@@ -150,16 +165,16 @@ impl Engine {
             }
         } else if press & 0x70 != 0 {
             match *cursor {
-                6 => return true,
-                7 => self.unported_note = Some("the sound test"),
+                6 => return Picked::InputTest,
+                7 => return Picked::SoundTest,
                 _ => {}
             }
         }
-        false
+        Picked::Nothing
     }
 
     /// `Options_DrawStrings`: the buffer cleared, then the screen's fixed strings.
-    fn options_strings(&mut self, which: u32) {
+    pub(super) fn options_strings(&mut self, which: u32) {
         self.plane_a_buffer.fill(0x8500);
         let list = rom::long(OPTIONS_MODE_STRINGS + which * 4);
         let count = rom::word(list);
@@ -171,7 +186,7 @@ impl Engine {
 
     /// `Options_Print`: characters through `Options_CharConv` onto the attribute's high
     /// byte, at a byte offset into the buffer.
-    fn options_print(&mut self, mut at: u16, attr: u16, mut text: u32) {
+    pub(super) fn options_print(&mut self, mut at: u16, attr: u16, mut text: u32) {
         loop {
             let c = rom::byte(text);
             if c & 0x80 != 0 {

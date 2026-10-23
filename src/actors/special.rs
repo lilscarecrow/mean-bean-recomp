@@ -155,6 +155,8 @@ impl Special {
 /// `loc_8F92`: a burst bean's debris (+$26 frames on this course, +$28 courses left).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Debris {
+    /// (its piece's side: the player's tag)
+    pub side: u8,
     pub color: u8,
     pub motion: Motion,
     pub timer: u16,
@@ -168,6 +170,7 @@ pub const DEBRIS_CODE: u32 = 0x8F92;
 /// vertical scroll entry, in bytes).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FieldShake {
+    pub side: u8,
     pub phase: u8,
     pub strength: u16,
     pub at: u16,
@@ -547,7 +550,7 @@ impl Engine {
             for _ in 0..2 {
                 let Some(slot) = self.free_slot() else { continue };
                 let motion = Motion { x: u32::from(s.x() + (i as u16) * 16) << 16, y: u32::from(s.y()) << 16, ..Motion::default() };
-                self.slots[slot] = Some(Actor::Debris(Debris { color, motion, timer: 0, courses: 8, anim: Anim { ptr: DEBRIS_SCRIPT, time: 0, frame: 4 } }));
+                self.slots[slot] = Some(Actor::Debris(Debris { side: s.id & 1, color, motion, timer: 0, courses: 8, anim: Anim { ptr: DEBRIS_SCRIPT, time: 0, frame: 4 } }));
             }
             points += worth;
         }
@@ -567,7 +570,7 @@ impl Engine {
         for col in 0..6u32 {
             if let Some(slot) = self.find_actor_slot() {
                 let w = rom::word(SHAKE + u32::from(s.motion.ax) * 12 + col * 2);
-                self.slots[slot] = Some(Actor::FieldShake(FieldShake { phase: 0x80, strength: w.wrapping_mul(strength), at }));
+                self.slots[slot] = Some(Actor::FieldShake(FieldShake { side: s.id & 1, phase: 0x80, strength: w.wrapping_mul(strength), at }));
             }
             at += 4;
         }

@@ -56,6 +56,8 @@ pub enum RefereeState {
     Thrown,
     Away,
     Back,
+    /// $5EA4: both sides paused (`loc_5E86`).
+    Paused,
 }
 
 impl RefereeState {
@@ -67,6 +69,7 @@ impl RefereeState {
             RefereeState::Thrown => 0x5D2C,
             RefereeState::Away => 0x5D42,
             RefereeState::Back => 0x5D58,
+            RefereeState::Paused => 0x5EA4,
         }
     }
 }
@@ -347,6 +350,11 @@ impl Engine {
                     r.state = RefereeState::Idle; // loc_5C5E
                 }
             }
+            RefereeState::Paused => {
+                if !self.both_paused() {
+                    r.state = RefereeState::Idle; // loc_5C5E
+                }
+            }
             RefereeState::Idle => {
                 if self.referee_hit & 0x8000 != 0 {
                     // loc_5D0C
@@ -356,8 +364,13 @@ impl Engine {
                     }
                     return Ok(Some(r));
                 }
-                if self.player_flags[0] & self.player_flags[1] & 0x80 != 0 {
-                    return Err(Unported("match over (loc_5E86)"));
+                if self.both_paused() {
+                    // loc_5E86
+                    let me = self.current_slot;
+                    if self.pause_referee(me) {
+                        r.state = RefereeState::Paused;
+                    }
+                    return Ok(Some(r));
                 }
                 // sub_5F6E: bob after landing.
                 if r.flags & 1 != 0 {

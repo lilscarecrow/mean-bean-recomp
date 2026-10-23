@@ -29,8 +29,9 @@ pub enum VdpOp {
     Font { vram: u16, art: u32 },
     /// `SpecPlane8C`/`9F` save the plane words under the text box (`plane_a_buffer`),
     /// `SpecPlane8D` puts them back: `cols` x `rows` from `at`, rows `row` bytes apart.
-    SaveBox { at: u16, cols: u16, rows: u16, row: u16 },
-    RestoreBox { at: u16, cols: u16, rows: u16, row: u16 },
+    /// (`buffer` 0 the text box's, 1 / 2 a paused side's field: `PausePuyoField`)
+    SaveBox { at: u16, cols: u16, rows: u16, row: u16, buffer: u8 },
+    RestoreBox { at: u16, cols: u16, rows: u16, row: u16, buffer: u8 },
     /// A DMA of `len` bytes of ROM (uncompressed tiles) to `vram`.
     RomCopy { vram: u16, from: u32, len: u16 },
     /// Words written straight to VRAM (pattern pixels).
@@ -72,6 +73,8 @@ impl FlowWait {
 impl Engine {
     /// `RunBytecode`: ops until one ends the frame.
     pub fn run_bytecode(&mut self, inputs: &Inputs) -> Result<(), Unported> {
+        // ReadCtrls (what the next frame's CheckPause sees)
+        self.pause_press = [inputs.pads[0].press, inputs.pads[1].press];
         if self.bytecode_disabled {
             return Ok(());
         }
@@ -219,7 +222,7 @@ impl Engine {
 
     /// The routines `BRUN` calls on the way between matches.
     fn run_routine(&mut self, at: u32, inputs: &Inputs) -> Result<(), Unported> {
-        if self.run_title_routine(at) || self.run_attract_routine(at) || self.run_tutorial_routine(at) || self.run_versus_routine(at) || self.run_password_routine(at) || self.run_options_routine(at) || self.run_menu_routine(at) || self.run_game_over_routine(at) || self.run_high_score_routine(at) || self.run_finale_routine(at) || self.run_credits_routine(at) || self.run_epilogue_routine(at) || self.run_intro_routine(at)? {
+        if self.run_title_routine(at) || self.run_attract_routine(at) || self.run_tutorial_routine(at) || self.run_versus_routine(at) || self.run_sound_test_routine(at) || self.run_password_routine(at) || self.run_options_routine(at) || self.run_menu_routine(at) || self.run_game_over_routine(at) || self.run_high_score_routine(at) || self.run_finale_routine(at) || self.run_credits_routine(at) || self.run_epilogue_routine(at) || self.run_intro_routine(at)? {
             return Ok(());
         }
         match at {

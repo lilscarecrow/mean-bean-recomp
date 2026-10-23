@@ -78,7 +78,7 @@ fn palette_state(ram: &Ram) -> ([[u16; 16]; 4], [Option<PaletteLoad>; 4], [FadeD
 fn menu_screen(a: &Actor) -> bool {
     matches!(
         a,
-        Actor::MainMenu(_) | Actor::Options(_) | Actor::PasswordEntry(_) | Actor::HighScoreTable(_) | Actor::TableNameEntry(_) | Actor::TitleHandler
+        Actor::MainMenu(_) | Actor::Options(_) | Actor::SoundTest(_) | Actor::PasswordEntry(_) | Actor::HighScoreTable(_) | Actor::TableNameEntry(_) | Actor::TitleHandler
     )
 }
 
@@ -105,6 +105,7 @@ fn flow_from(e: &mut Engine, ram: &Ram) {
     e.vs_left = [ram.u8(0xFF_012A), ram.u8(0xFF_012B)];
     e.vs_levels = [ram.u16(0xFF_010E), ram.u16(0xFF_0110)];
     e.ex_out = ram.u8(0xFF_1965);
+    e.sound_test = ram.u16(0xFF_FC02);
     e.byte_196a = ram.u8(0xFF_196A);
     e.attract_turn = ram.u8(0xFF_1970);
     e.demo_stage = ram.u8(0xFF_1971);
@@ -142,6 +143,8 @@ struct FlowSnap {
     lesson: (u16, u16, u8, u8, u8),
     vs: ([u8; 2], [u8; 2], [u16; 2]),
     ex: (u8, u8),
+    paused: u8,
+    sound_test: u16,
 }
 
 fn flow_snap(e: &Engine) -> FlowSnap {
@@ -164,6 +167,8 @@ fn flow_snap(e: &Engine) -> FlowSnap {
         lesson: (e.lesson, e.score_at, e.lesson_tick, e.cpu_pressed, e.cpu_lean),
         vs: (e.vs_wins, e.vs_left, e.vs_levels),
         ex: (e.ex_out, e.byte_196a),
+        paused: e.p1_paused,
+        sound_test: e.sound_test,
     }
 }
 
@@ -187,6 +192,8 @@ fn flow_snap_ram(ram: &Ram) -> FlowSnap {
         lesson: (ram.u16(0xFF_196E), ram.u16(0xFF_198A), ram.u8(0xFF_1129), ram.u8(0xFF_1D0C), ram.u8(0xFF_1D0D)),
         vs: ([ram.u8(0xFF_0128), ram.u8(0xFF_0129)], [ram.u8(0xFF_012A), ram.u8(0xFF_012B)], [ram.u16(0xFF_010E), ram.u16(0xFF_0110)]),
         ex: (ram.u8(0xFF_1965), ram.u8(0xFF_196A)),
+        paused: ram.u8(0xFF_0143),
+        sound_test: ram.u16(0xFF_FC02),
     }
 }
 
@@ -196,6 +203,8 @@ const VSCROLL: u32 = 0xFF_05D2;
 fn globals_from(ram: &Ram) -> Engine {
     let mut e = Engine::new();
     e.score_at = ram.u16(0xFF_198A);
+    e.p1_paused = ram.u8(0xFF_0143);
+    e.pause_press = [ram.u8(P1_CTRL + 1), ram.u8(P1_CTRL + 7)];
     e.cpu_pressed = ram.u8(0xFF_1D0C);
     e.cpu_lean = ram.u8(0xFF_1D0D);
     for i in 0..2 {
@@ -742,8 +751,11 @@ fn run_from(
                     continue;
                 }
                 Some(m) => {
+                    // (unless it was a frame after all: one whose logic took a long step,
+                    // or ended in CheckPause's wait having toggled a pause)
                     let mut probe = engine.clone();
-                    if probe.frame(&inputs).is_err() || probe.long_actor.is_none() {
+                    let ran = probe.frame(&inputs).is_ok();
+                    if !ran || (probe.long_actor.is_none() && mismatch(&probe, cur).is_some()) {
                         return Err(format!("frame {f} (lag frame): {m}"));
                     }
                 }
@@ -918,17 +930,21 @@ fn whole_matches_run_on_the_engine_alone() {
     for path in recordings() {
         let poked = support::poked_frames(&path);
         let all: Vec<Ram> = frames(&path).collect();
-        for f in 0..all.len() {
-            let waiting = |r: &Ram| [P1, P2].iter().all(|&t| r.player_actor(t).is_some_and(|a| r.code(a) == PLAYER_WAITING));
-            // Also a recording that starts in the middle of a match (from a savestate),
-            // when everything in it is ported.
-            let mid_match = f == 0
-                && !waiting(&all[0])
-                && engine_from(&all[0]).is_ok_and(|e| {
+        let waiting = |r: &Ram| [P1, P2].iter().all(|&t| r.player_actor(t).is_some_and(|a| r.code(a) == PLAYER_WAITING));
+        // Also a recording that starts in the middle of a match (from a savestate),
+        // when everything in it is ported: its first frame we can load (in its first
+        // ten seconds; a pair in flight can't be).
+        let match_running = |r: &Ram| {
+            !waiting(r)
+                && engine_from(r).is_ok_and(|e| {
                     // (a match still being set up is the other test's business)
                     let players = || e.slots.iter().filter_map(|s| if let Some(Actor::Player(p)) = s { Some(p) } else { None });
                     players().count() > 0 && players().all(|p| !matches!(p.state, PlayerState::Setup | PlayerState::WaitReady))
-                });
+                })
+        };
+        let mid_start = (0..all.len().min(600)).find(|&f| !poked.contains(&f) && match_running(&all[f]));
+        for f in 0..all.len() {
+            let mid_match = Some(f) == mid_start;
             // And the game flow right after the opponent screen (bytecode at $1D3E, no
             // actors): the stage intro, the transition, the match after.
             let at_intro = |r: &Ram| r.u32(0xFF_0A36) == 0x1D3E && r.u8(0xFF_0A3B) == 0 && !r.actors().any(|a| used(r, slot_of(a)));
@@ -1184,7 +1200,13 @@ fn screen_against(
         .find(|&f| {
             let boot = all[f].u32(0xFF_0A36) == 0x18BA && all[f - 1].u32(0xFF_0A36) != 0x18BA;
             // (or a savestate's first frames on a ported screen: the menus)
-            let on_screen = f < 8 && engine_from(&all[f]).is_ok_and(|e| e.slots.iter().flatten().any(menu_screen));
+            // (or in a match, its players past their setup)
+            let set_up = |p: &Player| !matches!(p.state, PlayerState::Setup | PlayerState::WaitReady);
+            let running = |e: &Engine| {
+                let players: Vec<&Player> = e.slots.iter().filter_map(|s| if let Some(Actor::Player(p)) = s { Some(p) } else { None }).collect();
+                e.slots.iter().flatten().any(menu_screen) || (!players.is_empty() && players.into_iter().all(set_up))
+            };
+            let on_screen = f < 600 && engine_from(&all[f]).is_ok_and(|e| running(&e));
             (boot || on_screen || quiet(&all[f]) && all[f].u32(RNG_SEED) != all[f - 1].u32(RNG_SEED)) && snaps.contains_key(&f) && !poked.contains(&f)
         });
     let starts: Vec<(usize, bool)> = flow_start.map(|f| (f, true)).into_iter().chain(setups.iter().map(|&s| (s, false))).collect();

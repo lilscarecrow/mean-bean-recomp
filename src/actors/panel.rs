@@ -356,7 +356,7 @@ impl Engine {
         let event = |e: &mut Engine, what: VdpOp| e.vdp_events.push(VdpEvent { at: e.plane_writes.len(), what });
         match kind {
             0x8C | 0x9F => {
-                event(self, VdpOp::SaveBox { at, cols: d3 + 1, rows: d4 + 1, row });
+                event(self, VdpOp::SaveBox { at, cols: d3 + 1, rows: d4 + 1, row, buffer: 0 });
                 let base: u16 = if kind == 0x8C { 0xE300 } else { 0xE100 };
                 let (w, h) = (d3 - 2, d4 - 2);
                 for c in 0..=w {
@@ -375,7 +375,7 @@ impl Engine {
                     self.plane_writes.push((line.wrapping_add(2 + c * 2), base | 0xFE));
                 }
             }
-            0x8D => event(self, VdpOp::RestoreBox { at, cols: d3 + 1, rows: d4 + 1, row }),
+            0x8D => event(self, VdpOp::RestoreBox { at, cols: d3 + 1, rows: d4 + 1, row, buffer: 0 }),
             // 0x8E: FillPlane from one row and column in.
             _ => self.fill(at.wrapping_add(0x82), 0x83FB, d3 - 1, d4 - 1),
         }

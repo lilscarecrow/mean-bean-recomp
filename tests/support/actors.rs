@@ -344,9 +344,9 @@ fn load_stage(ram: &Ram, a: u32, code: u32) -> Option<Actor> {
             x: ram.u16(a + 0x0A),
             y: ram.u16(a + 0x0E),
         }),
-        0x5BCE | 0x5BF8 | 0x5C62 | 0x5D2C | 0x5D42 | 0x5D58 => {
+        0x5BCE | 0x5BF8 | 0x5C62 | 0x5D2C | 0x5D42 | 0x5D58 | 0x5EA4 => {
             Actor::Referee(Referee {
-                state: [RefereeState::Spawned, RefereeState::Intro, RefereeState::Idle, RefereeState::Thrown, RefereeState::Away, RefereeState::Back]
+                state: [RefereeState::Spawned, RefereeState::Intro, RefereeState::Idle, RefereeState::Thrown, RefereeState::Away, RefereeState::Back, RefereeState::Paused]
                     .into_iter()
                     .find(|s| s.code() == code)
                     .unwrap(),
@@ -774,6 +774,20 @@ fn load_stage(ram: &Ram, a: u32, code: u32) -> Option<Actor> {
             step_b: ram.u8(a + 0x2B),
         }),
         PROLOGUE_CONTROL_CODE => Actor::PrologueControl,
+        SOUND_TEST_CODE | SOUND_TEST_UPDATE_CODE => Actor::SoundTest(SoundTest {
+            started: code == SOUND_TEST_UPDATE_CODE,
+            row: ram.u16(a + 0x26),
+            values: ram.bytes(a + 0x12, 6).try_into().unwrap(),
+        }),
+        PAUSE_SIGN_CODE | PAUSE_SIGN_UPDATE_CODE => Actor::PauseSign(PauseSign {
+            started: code == PAUSE_SIGN_UPDATE_CODE,
+            side: ram.u8(a + 0x2A),
+            draw: ram.u8(a + 6),
+            x: ram.u16(a + 0x0A),
+            y: ram.u16(a + 0x0E),
+            blink: ram.u8(a + 0x26),
+        }),
+        REFEREE_PAUSE_CODE => Actor::RefereePause(RefereePause { referee: slot_of(ram.u32(a + 0x2E)), anim: anim_from(ram, a) }),
         0x89D8 | 0x8A06 | 0x8A1A | 0x8A1E | 0x8A22 | 0x8AA8 | 0x8B48 | 0x8BA6 | 0x8D18 | 0x8D2A | 0x8D6E | 0x8DFE | 0x8E70 => {
             use SpecialState::*;
             let state = match code {
@@ -806,13 +820,14 @@ fn load_stage(ram: &Ram, a: u32, code: u32) -> Option<Actor> {
             })
         }
         0x8F92 => Actor::Debris(Debris {
+            side: (ram.u8(a) & 3).wrapping_sub(1) & 1,
             color: ram.u8(a + 8),
             motion: motion_at(ram, a),
             timer: ram.u16(a + 0x26),
             courses: ram.u16(a + 0x28),
             anim: anim_from(ram, a),
         }),
-        0x9066 => Actor::FieldShake(FieldShake { phase: ram.u8(a + 0x36), strength: ram.u16(a + 0x38), at: ram.u16(a + 0x26) }),
+        0x9066 => Actor::FieldShake(FieldShake { side: (ram.u8(a) & 3).wrapping_sub(1) & 1, phase: ram.u8(a + 0x36), strength: ram.u16(a + 0x38), at: ram.u16(a + 0x26) }),
         0x5D64 | 0x5D70 | 0x5DC2 | 0x5DE6 | 0x5E1A => Actor::RefereeThrow(RefereeThrow {
             state: [ThrowState::Start, ThrowState::WindUp, ThrowState::Fly, ThrowState::Away, ThrowState::Return][[0x5D64, 0x5D70, 0x5DC2, 0x5DE6, 0x5E1A].iter().position(|&c| c == code).unwrap()],
             referee: slot_of(ram.u32(a + 0x2E)),
@@ -1325,6 +1340,9 @@ pub fn describe(actor: &Actor) -> String {
         Actor::PrologueControl => "prologue control".into(),
         Actor::CoinSign => "coin sign".into(),
         Actor::Dissolve(d) => format!("{d:X?}"),
+        Actor::SoundTest(t) => format!("{t:X?}"),
+        Actor::PauseSign(s) => format!("{s:X?}"),
+        Actor::RefereePause(p) => format!("{p:X?}"),
         Actor::Special(s) => format!("{s:X?}"),
         Actor::Debris(b) => format!("{b:X?}"),
         Actor::FieldShake(f) => format!("{f:X?}"),

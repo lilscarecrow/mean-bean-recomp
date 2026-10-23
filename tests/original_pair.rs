@@ -66,6 +66,9 @@ fn run(input_lag: usize) -> (usize, Option<String>) {
                 LAG_FRAMES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 continue;
             }
+            if paused(prev) || paused(cur) {
+                continue; // (a paused side's pair doesn't move; CheckPause waits frames)
+            }
             let Some(player) = prev.player_actor(P1) else { continue };
             if ai::is_cpu(prev.u8(support::addr::LEVEL_MODE), 0, prev.u8(CONTROL_P1)) {
                 continue; // the CPU plays P1 (the demo): see cpu_pair_matches_the_original_every_frame
@@ -146,6 +149,11 @@ fn controlled_pair_matches_the_original_every_frame() {
 
 const LEVEL: u32 = 0xFF_0112;
 const CONTROL_P1: u32 = 0xFF_1958;
+
+/// Either side paused (bit 7 of `player_1_flags` / `player_2_flags`).
+fn paused(ram: &Ram) -> bool {
+    (ram.u8(0xFF_0144) | ram.u8(0xFF_0145)) & 0x80 != 0
+}
 const CPU_READS: u32 = 0xFF_1D0A;
 
 fn cpu_plan(ram: &Ram, player: u32) -> ai::Plan {
@@ -179,6 +187,9 @@ fn cpu_pair_matches_the_original_every_frame() {
             let Some((pivot, sat)) = p.pair(P2, false) else { continue };
             if p.bytes(0xFF_E000, 0x1000) == cur.bytes(0xFF_E000, 0x1000) {
                 lag += 1;
+                continue;
+            }
+            if paused(&p) || paused(cur) {
                 continue;
             }
             let Some(player) = p.player_actor(P2) else { continue };
