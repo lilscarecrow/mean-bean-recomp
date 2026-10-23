@@ -3,7 +3,8 @@
 //! ROM.
 //!
 //! Usage: `bean-machine [path to the ROM]` (or set `MBM_ROM`). Arrows move, Z/X/C are
-//! A/B/C (turn), Enter is Start. Esc quits.
+//! A/B/C (turn), Enter is Start. Esc quits. The sound is the ROM's own driver, ported;
+//! `MBM_MUTE=1` silences it.
 //!
 //! Not in the ROM: NETWORK on the main menu plays 1P vs 2P with someone on another
 //! machine (see [`bean_machine::netplay`] and [`bean_machine::netmenu`]). One player
