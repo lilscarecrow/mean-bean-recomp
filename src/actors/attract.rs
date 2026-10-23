@@ -131,6 +131,7 @@ impl Engine {
 
     /// `sub_A1C2` / `sub_A1EA`.
     pub(super) fn spawn_dissolve(&mut self, second: bool) {
+        self.play_sample(0x97);
         if let Some(slot) = self.find_actor_slot() {
             self.slots[slot] = Some(Actor::Dissolve(Dissolve { second, step: 0 }));
         }

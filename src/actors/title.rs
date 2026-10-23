@@ -450,6 +450,7 @@ impl Engine {
             let second = inputs.pads[1].press & 0x80 != 0;
             self.swap_controls = u8::from(second);
             self.byte_196a = u8::from(second);
+            self.play_sample(0x41); // loc_ED16
             self.bytecode_disabled = false;
             self.bytecode_flag = 0;
             return false;
@@ -545,6 +546,9 @@ impl Engine {
             return None;
         }
         r.wait = rom::byte(at + 1);
+        if set == 2 {
+            self.play_sample(0x94); // (thunder)
+        }
         let from = ROBOTNIK_COLORS + u32::from(set) * 8;
         for i in 0..4 {
             self.palettes[3][6 + i] = rom::word(from + i as u32 * 2);
@@ -573,6 +577,7 @@ impl Engine {
                     _ => 0,
                 };
                 if step == 0x1A {
+                    self.play_sound(0x1A); // BGM_TITLE
                     self.portrait_lock = (self.portrait_lock & 0xFF) | 0x100;
                     m.phase = 1;
                 }
@@ -628,6 +633,7 @@ impl Engine {
                 m.anim.step_with(&mut || self.random());
                 if m.anim.frame == 0x3F && m.anim.time == 3 {
                     self.spawn_machine_bean(m.beans);
+                    self.play_sample(0x57);
                     m.beans += 1;
                     if m.beans == 8 {
                         m.anim.ptr = MACHINE_END;
@@ -690,6 +696,9 @@ impl Engine {
         let _ = slot;
         if self.word_1126 == 0 {
             self.word_1126 = 4;
+        }
+        if self.portrait_lock >> 8 == 0 {
+            self.play_sound(0x1A); // (skipped to: the music now)
         }
         self.on_scroll(0, &mut m.x, &mut m.draw);
         m.anim.frame = 0x39;
@@ -772,10 +781,15 @@ impl Engine {
         Some(b)
     }
 
-    /// `sub_E2CE`: this bean's button (P1's in the high byte, P2's in the low).
-    fn bean_pressed(&self, b: &TitleBean, inputs: &Inputs) -> bool {
+    /// `sub_E2CE`: this bean's button (P1's in the high byte, P2's in the low); pressed,
+    /// it plays its note.
+    fn bean_pressed(&mut self, b: &TitleBean, inputs: &Inputs) -> bool {
         let pressed = u16::from(inputs.pads[0].press) << 8 | u16::from(inputs.pads[1].press);
-        pressed & rom::word(BEAN_BUTTONS + u32::from(b.index) * 2) != 0
+        if pressed & rom::word(BEAN_BUTTONS + u32::from(b.index) * 2) == 0 {
+            return false;
+        }
+        self.play_sample((b.index as u8).wrapping_add(0x4C));
+        true
     }
 
     pub(super) fn run_title_piece(&mut self, mut p: TitlePiece) -> Option<TitlePiece> {

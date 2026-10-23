@@ -95,6 +95,9 @@ fn flow_from(e: &mut Engine, ram: &Ram) {
     e.word_1126 = ram.u16(0xFF_1126);
     e.last_mode = ram.u8(0xFF_0105);
     e.options = ram.bytes(0xFF_FCA4, 9).try_into().unwrap();
+    e.sound_queue = ram.bytes(SOUND_QUEUE, 0x100).try_into().unwrap();
+    e.sound_tail = ram.u8(SOUND_TAIL);
+    e.level_music = ram.u8(0xFF_111A);
     e.swap_controls = ram.u8(0xFF_1966);
     e.use_plane_a_buffer = ram.u16(0xFF_1956) != 0;
     e.word_112c = ram.u16(0xFF_112C);
@@ -145,7 +148,13 @@ struct FlowSnap {
     ex: (u8, u8),
     paused: u8,
     sound_test: u16,
+    sound: (u8, Vec<u8>),
+    music: u8,
 }
+
+/// `sound_queue_tail`, `sound_queue`.
+const SOUND_TAIL: u32 = 0xFF_113B;
+const SOUND_QUEUE: u32 = 0xFF_113E;
 
 fn flow_snap(e: &Engine) -> FlowSnap {
     FlowSnap {
@@ -169,6 +178,8 @@ fn flow_snap(e: &Engine) -> FlowSnap {
         ex: (e.ex_out, e.byte_196a),
         paused: e.p1_paused,
         sound_test: e.sound_test,
+        sound: (e.sound_tail, e.sound_queue.to_vec()),
+        music: e.level_music,
     }
 }
 
@@ -194,6 +205,8 @@ fn flow_snap_ram(ram: &Ram) -> FlowSnap {
         ex: (ram.u8(0xFF_1965), ram.u8(0xFF_196A)),
         paused: ram.u8(0xFF_0143),
         sound_test: ram.u16(0xFF_FC02),
+        sound: (ram.u8(SOUND_TAIL), ram.bytes(SOUND_QUEUE, 0x100).to_vec()),
+        music: ram.u8(0xFF_111A),
     }
 }
 
@@ -304,6 +317,14 @@ fn mismatch_except(e: &Engine, ram: &Ram, skip: Option<usize>) -> Option<String>
         // (the half-run actor may already have set the scroll or the lair flag)
         want.hscroll = got.hscroll.clone();
         want.intro = got.intro;
+        want.sound = got.sound.clone();
+    }
+    if want.sound != got.sound {
+        // (the queue's last few IDs)
+        let last = |(tail, q): &(u8, Vec<u8>)| (1..=6u8).rev().map(|k| q[usize::from(tail.wrapping_sub(k))]).collect::<Vec<_>>();
+        return Some(format!("sound queue
+  ROM tail {:X} ..{:X?}
+  our tail {:X} ..{:X?}", want.sound.0, last(&want.sound), got.sound.0, last(&got.sound)));
     }
     if want != got {
         return Some(format!("game flow

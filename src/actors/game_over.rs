@@ -146,6 +146,7 @@ impl Engine {
         let press = inputs.pads[0].press;
         if press & 0x80 != 0 {
             // loc_DB4A: continue.
+            self.play_sample(0x41);
             self.bytecode_flag = 0;
             self.bytecode_disabled = false;
             t.done = true;
@@ -162,6 +163,9 @@ impl Engine {
             t.wait = 0x50;
             if t.count == 1 {
                 self.intro_cue = (self.intro_cue & 0xFF00) | 0x88;
+                self.play_sample(0x6D); // SFX_ROBOTNIK_LAUGH_2
+            } else {
+                self.play_sample(0x42);
             }
         }
         t.wait = t.wait.wrapping_sub(1);

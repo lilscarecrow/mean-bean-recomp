@@ -336,6 +336,7 @@ impl Engine {
             }
             4 => {
                 self.fireworks_mask = 0x3F;
+                self.sound_command(0xFD); // FadeSound
                 e.delay = 0x12C;
                 e.phase = 5;
             }

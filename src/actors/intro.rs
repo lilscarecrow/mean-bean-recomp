@@ -241,8 +241,7 @@ impl Engine {
                 self.queue_panel(PanelCommand::List(0));
                 self.spawn_clouds();
             }
-            // PlayLevelIntroMusic
-            0x2692 => {}
+            0x2692 => self.play_level_intro_music(),
             // LoadLevelIntroArt, then the backdrop's maps a frame each
             0xF5A0 => {
                 self.long_step();
@@ -401,7 +400,10 @@ impl Engine {
         let to = s.at.wrapping_add((s.col + 1) * 2).wrapping_add((s.line * 2 + 1) << 7);
         self.plane_writes.push((to, tile));
         s.wait = 1;
-        self.text_tick = self.text_tick.wrapping_add(1); // (a typing sound every other one)
+        self.text_tick = self.text_tick.wrapping_add(1);
+        if self.text_tick & 1 == 0 {
+            self.play_sample(0x69); // (typing)
+        }
         advance(s);
     }
 
@@ -714,7 +716,9 @@ impl Engine {
                 e.vdp_regs[0x0B] &= 0xFC;
                 e.hscroll[1] = 0;
             } else {
+                // ActLevelTrans_FGStop
                 e.vscroll[0] = 0;
+                e.play_sample(0x45);
                 e.bytecode_disabled = false;
             }
             None

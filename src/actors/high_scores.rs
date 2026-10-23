@@ -203,6 +203,7 @@ impl Engine {
                 t.scroll = left;
                 if borrow {
                     // loc_C6D0: an entry still to be named gets its name entry here.
+                    self.play_sample(0x67);
                     if self.bytecode_disabled {
                         for i in (0..5).rev() {
                             let (entry, _) = self.high_score_entry(i);
@@ -308,6 +309,7 @@ impl Engine {
                     n.anim.frame = 0x80;
                     self.draw_name_letter(&n);
                     n.at += 1;
+                    self.play_sample(0x41);
                     if n.at >= 3 {
                         // loc_C3AA: the name into the table.
                         let (entry, _) = self.high_score_entry(n.entry);
@@ -328,12 +330,14 @@ impl Engine {
                             n.letters[i] = 0;
                         }
                         n.blink = 0;
+                        self.play_sample(0x42);
                     } else if held & 0x01 != 0 {
                         n.letters[i] = n.letters[i].wrapping_sub(1);
                         if n.letters[i] & 0x80 != 0 {
                             n.letters[i] = LETTER_WRAP;
                         }
                         n.blink = 0;
+                        self.play_sample(0x42);
                     } else {
                         n.anim.frame = ((n.blink << 1) & 0x20) | 0x80;
                         self.draw_name_letter(&n);
@@ -343,6 +347,7 @@ impl Engine {
             NamePhase::Back => {
                 if n.anim.step_with(&mut || self.random()) {
                     n.at -= 1;
+                    self.play_sample(0x42); // loc_C39A
                     self.name_letter_in(&mut n);
                 } else {
                     

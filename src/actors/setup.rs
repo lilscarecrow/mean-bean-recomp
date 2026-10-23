@@ -97,6 +97,10 @@ impl Engine {
         self.score_at = if self.swap_controls != 0 { 0xCC22 } else { 0xCB1E };
         self.time_frames = 0;
         self.time_minutes = 0;
+        if self.level_mode == 0 {
+            self.level_music = 0;
+            self.play_level_music();
+        }
         // loc_3C40: ClearScroll, then column vertical scroll on.
         self.vscroll = [0; 40];
         self.hscroll = [0; 0x200];

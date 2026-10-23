@@ -7,7 +7,6 @@
 
 use super::*;
 use crate::rom;
-use crate::sound::Sound;
 
 pub const SOUND_TEST_CODE: u32 = 0x22736;
 pub const SOUND_TEST_UPDATE_CODE: u32 = 0x22748;
@@ -112,12 +111,17 @@ impl Engine {
             return None;
         }
         if press & 0x10 != 0 {
-            self.sounds.push(Sound::Stop);
+            self.stop_sound();
             return Some(t);
         }
         if press & 0x60 != 0 {
+            // (the driver commands through `PlaySound_ChkPCM`)
             let id = self.sound_test_id(&t, usize::from(t.row));
-            self.play_sound(id);
+            if t.row == 5 {
+                self.play_sample(id);
+            } else {
+                self.play_sound(id);
+            }
             return Some(t);
         }
         let repeat = inputs.pads[0].repeat | inputs.pads[1].repeat;

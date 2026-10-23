@@ -274,8 +274,8 @@ impl Engine {
         let mut pair = s.pair();
         let (step, events) = pair.step_special(&self.fields[id], pad, fall_speed, self.frame_count);
         s.set_pair(&pair);
+        self.pair_sounds(id as u8, &events);
         if events.touched_down {
-            self.land_effects(id as u8);
             if s.mappings == 0x1A {
                 s.anim.ptr = DRILL_BOUNCE; // sub_5288 / sub_52AE
             }
@@ -366,6 +366,9 @@ impl Engine {
                 }
             }
             Step => {
+                if s.w28 & 3 == 0 {
+                    self.play_sample(0x4B);
+                }
                 s.anim.step_with(&mut random);
                 s.set_x(s.x().wrapping_add((s.motion.vx >> 16) as u16));
                 s.set_y(s.y().wrapping_add((s.motion.vy >> 16) as u16));
@@ -421,6 +424,7 @@ impl Engine {
                     s.set_y(0x148);
                     s.anim.ptr = DRILL_BOUNCE;
                     s.w26 = 0x80;
+                    self.play_sample(0x49);
                     self.drill_bounce(&mut s);
                 }
             }
@@ -439,6 +443,7 @@ impl Engine {
     /// `loc_8A54`: the $19 piece settles one row lower, into the bean there (or out of
     /// the bottom).
     fn bean_landed(&mut self, s: &mut Special) {
+        self.play_land_sound();
         let id = usize::from(s.id & 1);
         s.motion.ay = s.motion.ay.wrapping_add(1);
         if s.motion.ay >= ROWS as u16 {
@@ -559,6 +564,7 @@ impl Engine {
         self.set_cell_byte(id, s.w26.wrapping_add(2), 0, Some(0xFF));
         s.w26 = s.w26.wrapping_add(0x0C);
         self.redraw_field(id);
+        self.play_sample(0x4A);
     }
 
     /// `loc_8E40`: the field shakes; the piece bounces off.
@@ -665,6 +671,7 @@ impl Engine {
                 t.motion.vy = 0xFFFF_0000 | (t.motion.vy & 0xFFFF);
                 t.motion.ax = 0x0A00;
                 t.motion.ay = 0x1800;
+                self.play_sample(0);
                 t.state = ThrowState::Fly;
             }
             ThrowState::Fly => {
@@ -700,6 +707,7 @@ impl Engine {
                         r.last_frame = 0xFF;
                     }
                     self.referee_hit = 0;
+                    self.play_sample(0x45);
                     return None;
                 }
             }

@@ -107,6 +107,9 @@ pub struct PivotEvents {
     pub soft_drop_point: bool,
     /// The pair touched down while falling (`PuyoLandEffects`).
     pub touched_down: bool,
+    /// It moved a column (`PlayPuyoMoveSound`) / turned (`PlayPuyoRotateSound`).
+    pub moved: bool,
+    pub turned: bool,
 }
 
 /// What a frame did.
@@ -173,9 +176,9 @@ impl Pair {
         frame_count: u16,
     ) -> (Step, PivotEvents) {
         self.pivot_anim.step();
-        self.slide_or_move(field, &mut pad);
-        self.rotate(field, &mut pad, keys);
         let mut events = PivotEvents::default();
+        self.slide_or_move(field, &mut pad, &mut events);
+        self.rotate(field, &mut pad, keys, &mut events);
         let step = self.fall(field, &mut pad, fall_speed, frame_count, &mut events);
         (step, events)
     }
@@ -184,8 +187,8 @@ impl Pair {
     /// (its own animation is the actor's).
     pub fn step_special(&mut self, field: &Field, mut pad: impl PadSource, fall_speed: u16, frame_count: u16) -> (Step, PivotEvents) {
         let anim = self.pivot_anim;
-        self.slide_or_move(field, &mut pad);
         let mut events = PivotEvents::default();
+        self.slide_or_move(field, &mut pad, &mut events);
         let step = self.fall(field, &mut pad, fall_speed, frame_count, &mut events);
         self.pivot_anim = anim;
         (step, events)
@@ -211,7 +214,7 @@ impl Pair {
     }
 
     /// `sub_5060`.
-    fn slide_or_move(&mut self, field: &Field, pad: &mut impl PadSource) {
+    fn slide_or_move(&mut self, field: &Field, pad: &mut impl PadSource, events: &mut PivotEvents) {
         if self.slide != 0 {
             let toward_zero = if self.slide & 0x8000 != 0 { 8 } else { 8u16.wrapping_neg() };
             self.slide = self.slide.wrapping_add(toward_zero);
@@ -233,10 +236,11 @@ impl Pair {
         }
         self.col = self.col.wrapping_add(dcol);
         self.slide = slide;
+        events.moved = true;
     }
 
     /// `sub_5384`.
-    fn rotate(&mut self, field: &Field, pad: &mut impl PadSource, keys: RotateKeys) {
+    fn rotate(&mut self, field: &Field, pad: &mut impl PadSource, keys: RotateKeys, events: &mut PivotEvents) {
         if self.locked {
             return;
         }
@@ -261,6 +265,7 @@ impl Pair {
         self.sat_angle = self.rot.rotate_right(2);
         self.rot = new;
         self.sat_turn = anim;
+        events.turned = true;
     }
 
     fn down_only(pad: PadInput) -> bool {

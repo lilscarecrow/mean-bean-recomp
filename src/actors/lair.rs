@@ -283,6 +283,7 @@ impl Engine {
                 }
             }
             4 => {
+                self.play_sample(0x87);
                 if let Some(slot) = self.find_actor_slot() {
                     let motion = Motion { x: u32::from(r.x) << 16, y: u32::from(r.y) << 16, vx: 0xFFFE_0000, vy: 0x5_0000, ..Motion::default() };
                     let p = ThrownPiece { parent, phase: ThrowPhase::Start, delay: 0, draw: 0xB3, motion };
@@ -429,7 +430,10 @@ impl Engine {
                 p.phase = ThrowPhase::Wait27;
             }
             ThrowPhase::Wait27 => wait(&mut p, ThrowPhase::Sound),
-            ThrowPhase::Sound => p.phase = ThrowPhase::Fall,
+            ThrowPhase::Sound => {
+                self.play_sample(0x96);
+                p.phase = ThrowPhase::Fall;
+            }
             ThrowPhase::Fall => {
                 if !alive(self, p.parent) {
                     return None;
@@ -445,6 +449,7 @@ impl Engine {
                 p.motion.vy = p.motion.vy.wrapping_add(0x2000);
                 let (x, y) = ((p.motion.x >> 16) as u16, (p.motion.y >> 16) as u16);
                 if (x as i16) < 0xC0 {
+                    self.play_sample(0x67);
                     return None;
                 }
                 if let Some(Actor::RobotnikIntro(r)) = self.slots[p.parent].as_mut() {

@@ -176,7 +176,8 @@ impl Engine {
         if self.level_mode >= 1 {
             return Err(Unported("top-out outside scenario mode (loc_7A12)"));
         }
-        p.state = PlayerState::TopOut; // StopSound, then the next frame
+        self.stop_sound();
+        p.state = PlayerState::TopOut; // (the next frame)
         Ok(())
     }
 
@@ -195,6 +196,7 @@ impl Engine {
             if self.opponent == OPP_ROBOTNIK {
                 self.spawn_voice(RobotnikVoice::VICTORY); // sub_7C14
             }
+            self.play_sample(0x59);
             self.wipe_field(p);
             p.state = PlayerState::Wipe;
             return Ok(());
@@ -226,6 +228,7 @@ impl Engine {
         if self.opponent == OPP_ROBOTNIK {
             self.spawn_voice(RobotnikVoice::DEFEAT); // sub_7BD8
         }
+        self.play_level_win_music();
         self.wipe_field(p);
         p.state = PlayerState::Wipe;
         Ok(())
@@ -257,7 +260,7 @@ impl Engine {
         v.wait = v.wait.wrapping_sub(1);
         // bpl: past 0 the sample plays and the actor ends.
         if v.wait & 0x8000 != 0 {
-            self.play_sound(v.line);
+            self.play_sample(v.line);
             return None;
         }
         Some(v)
@@ -383,6 +386,7 @@ impl Engine {
             }
             ResultsShown => {
                 self.queue_panel(PanelCommand::Time(p.beans_total)); // sub_7CD2
+                self.play_sample(0x5C);
                 p.delay = 0x20;
                 p.state = BonusWait;
             }
@@ -394,10 +398,12 @@ impl Engine {
             Bonus => {
                 if p.base == 0 {
                     self.queue_panel(PanelCommand::Text { entry: NO_BONUS_TEXT, blink: 0, player: 0 });
+                    self.play_sample(0x5E); // loc_7E30
                     p.delay = 0x40;
                     p.state = NoBonusWait;
                 } else {
                     self.queue_panel(PanelCommand::Bonus(p.base));
+                    self.play_sample(0x5D);
                     p.w28 = (p.base >> 7).max(1);
                     p.w26 = 0x80;
                     p.delay = 0x3C;
@@ -425,6 +431,9 @@ impl Engine {
                     p.base -= step;
                     add_points(p, u32::from(step));
                     self.queue_panel(PanelCommand::Score(p.id));
+                    if p.w26 & 3 == 0 {
+                        self.play_sample(0x5F); // (a tick every 4th frame)
+                    }
                     self.queue_panel(PanelCommand::Bonus(p.base));
                 }
             }
@@ -545,6 +554,7 @@ impl Engine {
         match n.state {
             NameEntryState::Start => {
                 self.name_prompt(n.player_id, n.rank as u8);
+                self.play_sample(0);
                 n.state = NameEntryState::Clear;
             }
             NameEntryState::Clear => {
@@ -557,9 +567,14 @@ impl Engine {
                 let pad = inputs.pads[usize::from(n.player_id & 1)];
                 let at = usize::from(n.cursor).min(4);
                 if pad.press & 0x04 != 0 {
-                    n.cursor = n.cursor.saturating_sub(1); // left: back a letter
+                    // left: back a letter
+                    if n.cursor != 0 {
+                        n.cursor -= 1;
+                        self.play_sample(0x42);
+                    }
                 } else if pad.press & 0x70 != 0 {
                     n.cursor += 1;
+                    self.play_sample(0x41);
                     if n.cursor >= 3 {
                         self.save_name(&n);
                         n.timeout = 0;
@@ -569,9 +584,11 @@ impl Engine {
                 } else if pad.repeat & 0x02 != 0 {
                     n.letters[at] = if n.letters[at] + 1 >= 0x1B { 0 } else { n.letters[at] + 1 };
                     n.blink = 0;
+                    self.play_sample(0x42);
                 } else if pad.repeat & 0x01 != 0 {
                     n.letters[at] = if n.letters[at] == 0 || n.letters[at] & 0x80 != 0 { 0x1A } else { n.letters[at] - 1 };
                     n.blink = 0;
+                    self.play_sample(0x42);
                 }
             }
             NameEntryState::Shown => {
@@ -697,10 +714,12 @@ impl Engine {
     fn after_results(&mut self, p: &mut Player) -> PlayerState {
         if self.level == 0x0F {
             self.queue_panel(PanelCommand::Text { entry: FINAL_TEXT, blink: 0, player: 0 });
+            self.play_sample(0x70);
             p.delay = 0x78;
             return PlayerState::FinalWait;
         }
         self.password_command = true;
+        self.play_sample(0x70);
         PlayerState::Continue
     }
 
@@ -777,6 +796,7 @@ impl Engine {
                     };
                     self.slots[slot] = Some(Actor::StarSpark(StarSpark { motion, draw: 0x87, anim }));
                 }
+                self.play_sample(0x60);
                 return None;
             }
         }

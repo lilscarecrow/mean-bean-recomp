@@ -163,6 +163,7 @@ impl Engine {
         if p.beans_total == 0 || bytes[count] != 0 || bytes[count + 1] != 0 {
             return;
         }
+        self.play_sample(0x4C);
         add_points(p, (u32::from(p.speed_level) + 1) * 0x1F4 + 0x1F40);
         self.queue_panel(PanelCommand::Score(p.id));
     }
@@ -202,6 +203,7 @@ impl Engine {
         let id = usize::from(p.id & 1);
         self.popping[id] = true;
         self.player_flags[id] = 0;
+        self.play_sample(0x59);
         self.wipe_field(p);
         p.state = PlayerState::Wipe;
     }
@@ -255,6 +257,7 @@ impl Engine {
                 if press & 0x80 != 0 {
                     // loc_81AE
                     self.ex_out &= !(p.id + 1);
+                    self.play_sample(0x41);
                     p.flags &= !1;
                     p.state = PlayerState::Ex(ExState::Join);
                     return true;

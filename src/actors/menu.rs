@@ -118,19 +118,23 @@ impl Engine {
                 if press & 0xF0 != 0 && m.line == NETWORK_LINE {
                     self.network_chosen = true;
                 } else if press & 0xF0 != 0 {
-                    // sub_BCC2: 1P vs 2P needs a second pad (there always is one here).
+                    // sub_BCC2: 1P vs 2P needs a second pad (there always is one here;
+                    // without it, sound $67).
+                    self.play_sample(0x41);
                     self.last_mode = m.line as u8;
                     m.count = 0;
                     m.phase = 2;
                 } else if press & 1 != 0 {
                     if m.line != 0 {
                         m.line -= 1;
+                        self.play_sample(0x42);
                     }
                     self.queue_panel(PanelCommand::List(0x0C + m.line));
                 } else if press & 2 != 0 {
                     let last = if self.network_line { NETWORK_LINE } else { 3 };
                     if m.line < last {
                         m.line += 1;
+                        self.play_sample(0x42);
                     }
                     if m.line < NETWORK_LINE {
                         self.queue_panel(PanelCommand::List(0x0C + m.line));
@@ -196,6 +200,7 @@ impl Engine {
             5 => {
                 m.anim.step_with(&mut || self.random());
                 if press & 0xF0 != 0 {
+                    self.play_sample(0x41); // loc_BEB4
                     m.count = 0;
                     m.phase = 6;
                 } else if press & 1 != 0 {
@@ -203,11 +208,13 @@ impl Engine {
                         m.line = 0;
                         m.y = 0xD8;
                         self.queue_panel(PanelCommand::List(0x10));
+                        self.play_sample(0x42);
                     }
                 } else if press & 2 != 0 && m.line == 0 {
                     m.line = 1;
                     m.y = 0xF0;
                     self.queue_panel(PanelCommand::List(0x11));
+                    self.play_sample(0x42);
                 }
             }
             _ => {}

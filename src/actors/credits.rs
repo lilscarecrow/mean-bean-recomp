@@ -403,6 +403,7 @@ impl Engine {
         let tile = 0xE500 | u16::from(rom::byte(FONT + u32::from(c)));
         self.plane_writes.push((t.at, tile));
         t.at = t.at.wrapping_add(2);
+        self.play_sample(0x69);
         t.left -= 1;
         if t.left == 0 {
             return None;
@@ -537,6 +538,7 @@ impl Engine {
                 b.motion.y = (b.motion.y & 0xFFFF) | u32::from(y.wrapping_sub(0x70)) << 16;
                 if b.motion.tx >= 0xC0 {
                     b.anim.ptr = HAS_BEAN_LANDED;
+                    self.play_sample(0x45); // loc_10A86
                     b.phase = 4;
                 }
             }

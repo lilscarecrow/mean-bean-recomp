@@ -360,6 +360,7 @@ impl Engine {
                     // loc_4022
                     s.level = self.vs_levels[usize::from(id & 1)];
                     self.queue_panel(level_cmd(0x8000 | (s.level & 0xFF)));
+                    self.play_sample(0x5C);
                     s.state = SelectState::Ready;
                 }
             }
@@ -371,6 +372,7 @@ impl Engine {
                 let press = inputs.pads[usize::from((id ^ self.swap_controls) & 1)].press;
                 if press & 0xF0 != 0 {
                     // loc_4112
+                    self.play_sample(0x41);
                     s.timer = 0;
                     s.state = SelectState::Picked;
                 } else {
@@ -385,6 +387,7 @@ impl Engine {
                         self.queue_panel(level_cmd(s.level));
                         s.level = s.level.wrapping_add(step);
                         self.queue_panel(level_cmd(0x8000 | (s.level & 0xFF)));
+                        self.play_sample(0x42);
                     }
                 }
             }
@@ -495,6 +498,7 @@ impl Engine {
         self.popping[usize::from(p.id & 1)] = true;
         self.player_flags = [0, 0];
         self.delete_player(p.other_slot);
+        self.play_sample(0x59);
         self.opponent = OPP_ARMS;
         let winner = usize::from((p.id ^ 1) & 1);
         self.vs_wins[winner] += 1;
@@ -614,6 +618,7 @@ impl Engine {
                 let again = if self.wait_to_continue { self.both_started(inputs) } else { press & 0x80 != 0 };
                 if again {
                     // loc_80B8: play again.
+                    self.play_sample(0x41);
                     self.bytecode_disabled = false;
                     self.bytecode_flag = 0;
                     return false;
@@ -965,6 +970,7 @@ impl Engine {
                 tens = if n / 10 == 0 { 0 } else { ((n / 10 + 1) * 2) as u8 };
                 ones = ((n % 10 + 1) * 2) as u8;
                 self.countdown_text(&COUNTDOWN_TEXT, tens, ones);
+                self.play_sample(0x69);
                 Some(VsCast::Countdown { player, tens, ones })
             }
         }

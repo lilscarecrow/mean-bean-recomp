@@ -229,6 +229,7 @@ impl Engine {
 
     /// `.StartFlash`: "STAGE n" under the portrait frame.
     fn stage_banner(&mut self) {
+        self.play_sample(0x54);
         let mut n = self.level.wrapping_sub(2) as i8;
         let mut tens = 0u16;
         if n >= 0x0A {

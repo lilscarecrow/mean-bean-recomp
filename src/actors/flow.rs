@@ -4,8 +4,8 @@
 //! `BFADEW` hand over to actors, which clear `bytecode_disabled` when they're done.
 //!
 //! What the bytecode does to video memory (art, VDP registers, plane lists) comes out as
-//! [`VdpEvent`]s for whoever keeps the VRAM; sound ops do nothing here. `BRUN` calls the
-//! ported routines by their ROM address; any other stops with `Unported`.
+//! [`VdpEvent`]s for whoever keeps the VRAM, its sounds go in the sound queue; `BRUN`
+//! calls the ported routines by their ROM address; any other stops with `Unported`.
 
 use super::*;
 use crate::rom;
@@ -161,9 +161,18 @@ impl Engine {
                     let colors = self.table_palette_at(arg);
                     self.fade_palette(arg & 3, speed, 8, &colors);
                 }
-                // Sound: BSND / BSNDP / BSNDP2 (operand), BSFADE / BSSTOP (none).
-                0x0F | 0x10 | 0x13 => {}
-                0x11 | 0x12 => self.bytecode_pc -= 2,
+                // BSND, BSNDP / BSNDP2 (`PlaySound_ChkPCM`)
+                0x0F => self.play_sound(arg as u8),
+                0x10 | 0x13 => self.play_sample(arg as u8),
+                // BSFADE, BSSTOP (no operand)
+                0x11 => {
+                    self.bytecode_pc -= 2;
+                    self.sound_command(0xFD);
+                }
+                0x12 => {
+                    self.bytecode_pc -= 2;
+                    self.stop_sound();
+                }
                 // BFADEI
                 0x15 => {
                     let (speed, lair) = (rom::byte(self.bytecode_pc), rom::byte(self.bytecode_pc + 1));

@@ -26,6 +26,7 @@ mod tutorial;
 mod versus;
 mod exercise;
 mod special;
+mod music;
 mod pause;
 mod soundtest;
 mod credits;
@@ -89,6 +90,13 @@ const CHAIN_BONUS: [u16; 9] = [0, 8, 16, 32, 64, 128, 256, 512, 1024];
 const COLOR_BONUS: [u16; 7] = [0, 0, 3, 6, 12, 24, 48];
 const GROUP_BONUS: [u16; 12] = [0, 0, 0, 0, 0, 2, 3, 4, 5, 6, 7, 10];
 const SCORE_CAP: u32 = 99_999_999;
+/// `SamplesAllowed`: per sample ($80 up), whether it plays with the sampling option off.
+const SAMPLES_ALLOWED: u32 = 0x8786;
+/// `PuyoPopSounds`: by chain length.
+const POP_SOUNDS: u32 = 0x4AD8;
+/// `ComboVoices` (P1's, then P2's) and `GarbageSounds`.
+const COMBO_VOICES: u32 = 0x23584;
+const GARBAGE_SOUNDS: u32 = 0x23748;
 const GARBAGE_POINTS: u32 = 70;
 /// Scenario mode fall rate and beans to the next speed-up, by speed step (`unk_9DC4`).
 const SCENARIO_SPEEDS: [(u16, u16); 24] = [
@@ -1241,6 +1249,12 @@ pub struct Engine {
     pub vdp_events: Vec<VdpEvent>,
     /// Sounds asked for since the caller last took them (`PlaySound`, `StopSound`).
     pub sounds: Vec<crate::sound::Sound>,
+    /// `sound_queue` and `sound_queue_tail`: every ID `PlaySound` queued (the driver's
+    /// side, taking them off at the vertical blank, is the sound player's).
+    pub sound_queue: [u8; 0x100],
+    pub sound_tail: u8,
+    /// `cur_level_music`: the stage tune playing (see `music.rs`).
+    pub level_music: u8,
     /// `vdp_reg_0`.. (the register mirror), `hscroll_buffer` (planes A and B).
     pub vdp_regs: [u8; 0x13],
     pub hscroll: [u16; 0x200],
@@ -1354,6 +1368,10 @@ pub struct Engine {
     pub pause_press: [u8; 2],
     pub p1_paused: u8,
     pub pause_next: Option<(usize, u8)>,
+    /// The sound due after a toggle's `VSync` (true: paused), and which of
+    /// `PauseSound` / `UnpauseSound` this check already sent (bits 0 / 1).
+    pub pause_sound: Option<bool>,
+    pub pause_sounds_sent: u8,
 }
 
 impl Engine {
@@ -1412,6 +1430,9 @@ impl Engine {
             deferred_tail: 0,
             vdp_events: vec![],
             sounds: vec![],
+            sound_queue: [0; 0x100],
+            sound_tail: 0,
+            level_music: 0,
             vdp_regs: [0; 0x13],
             hscroll: [0; 0x200],
             repeat_times: (8, 2),
@@ -1461,6 +1482,8 @@ impl Engine {
             pause_press: [0; 2],
             p1_paused: 0,
             pause_next: None,
+            pause_sound: None,
+            pause_sounds_sent: 0,
             actors_derailed: false,
             unported_extra: None,
             dma_queue: vec![],
@@ -1923,6 +1946,7 @@ impl Engine {
                         self.exercise_specials_due(&p); // sub_88A8
                         self.all_clear_bonus(&mut p); // sub_9332
                     }
+                    self.handle_level_music(p.id);
                     p.state = PreSpawn1;
                 }
             }
@@ -2112,10 +2136,18 @@ impl Engine {
                 }
             }
         }
+        // loc_4ABC: the pop's sound by the chain so far.
+        self.play_sample(crate::rom::byte(POP_SOUNDS + u32::from(p.chain.min(6))));
     }
 
     /// `SpawnGarbageGlow`.
     fn spawn_glow(&mut self, player_slot: usize, p: &Player) {
+        if p.chain != 0 {
+            // ComboVoices, by chain length (P2's from the second row)
+            let i = if (p.chain as i8) < 6 { p.chain } else { 4 };
+            let row = if p.id != 0 { 8 } else { 0 };
+            self.play_sample(crate::rom::byte(COMBO_VOICES + row + u32::from(i)));
+        }
         let Some(slot) = self.find_actor_slot() else { return };
         let (x, y) = self.glow_xy;
         self.slots[slot] = Some(Actor::Glow(Glow {
@@ -2216,6 +2248,9 @@ impl Engine {
                 g.counter = g.counter.wrapping_sub(1);
                 if done {
                     g.anim.ptr = script::GLOW_END[g.player as usize & 1];
+                    // loc_236FE: GarbageSounds by the chain
+                    let i = g.chain.wrapping_sub(1);
+                    self.play_sample(crate::rom::byte(GARBAGE_SOUNDS + u32::from(if i < 4 { i } else { 3 })));
                     self.glow_finish(&mut g);
                 }
             }
@@ -2330,6 +2365,9 @@ impl Engine {
         if d.falling != d.seen {
             d.seen = d.falling;
             d.shake = d.strength;
+            if !d.voiced {
+                self.play_sample(0x88); // VOI_GARBAGE_1
+            }
             d.voiced = true;
         }
         // The field's 6 columns of plane A wobble (from +$2C: GetPuyoField's plane address).
@@ -2473,6 +2511,9 @@ impl Engine {
         }
         p.beans_count = 0;
         p.speed_index = p.speed_index.wrapping_add(1);
+        if self.level_mode & 3 != 0 && p.speed_index & 7 == 0 {
+            self.play_sample(0x5B);
+        }
         if self.level_mode & 3 == 1 {
             // (every 8 steps, the level goes up)
             if p.speed_index & 7 == 0 && p.speed_level < 0x62 {
@@ -2622,9 +2663,7 @@ impl Engine {
                     v.pair.step_pivot(&self.fields[id], inputs.pads[id], inputs.keys[id], fall_speed, self.frame_count)
                 };
                 let (step, events) = step;
-                if events.touched_down {
-                    self.land_effects(id as u8);
-                }
+                self.pair_sounds(id as u8, &events);
                 if events.soft_drop_point {
                     self.player_mut(v.player_slot).flags |= flag::SOFT_DROP_POINT;
                 }
@@ -2656,6 +2695,7 @@ impl Engine {
             PivotState::Falling => {
                 let mut row = v.pair.row;
                 if v.fall.step(&self.fields[id], v.pair.col, &mut row) {
+                    self.play_land_sound(); // loc_4F94
                     v.pair.pivot_anim.ptr = script::SQUASH;
                     v.pair.pivot_anim.time = 0;
                     v.state = PivotState::Squash;
@@ -2714,6 +2754,7 @@ impl Engine {
                 let id = s.player_id as usize & 1;
                 let mut row = s.row;
                 if s.fall.step(&self.fields[id], s.col, &mut row) {
+                    self.play_land_sound(); // loc_5504
                     s.anim.ptr = script::SQUASH;
                     s.state = SatelliteState::Squash;
                 }
@@ -2798,8 +2839,31 @@ impl Default for Engine {
 }
 
 impl Engine {
-    /// `PlaySound`: asks for sound `id` (see [`crate::sound`]).
+    /// `PlaySound`: queues sound `id` (see [`crate::sound`]).
     pub(crate) fn play_sound(&mut self, id: u8) {
+        self.sound_queue[usize::from(self.sound_tail)] = id;
+        self.sound_tail = self.sound_tail.wrapping_add(1);
         self.sounds.push(crate::sound::Sound::Play(id));
+    }
+
+    /// `PlaySound_ChkPCM`: with the sampling option off, voice samples ($80 up) only
+    /// when `SamplesAllowed` lets them through (the ones that aren't voices).
+    pub(crate) fn play_sample(&mut self, id: u8) {
+        if id & 0x80 != 0 && self.options[OPT_NO_SAMPLES] != 0 && crate::rom::byte(SAMPLES_ALLOWED + u32::from(id & 0x7F)) == 0 {
+            return;
+        }
+        self.play_sound(id);
+    }
+
+    /// `StopSound`: the sound effects' stop, then the music's.
+    pub(crate) fn stop_sound(&mut self) {
+        self.play_sound(0x6F);
+        self.play_sound(0xFE);
+    }
+
+    /// `FadeSound` ($FD), `PauseSound` / `UnpauseSound` ($FF) and `StopSFX` ($6F): a
+    /// command for the driver past the queue (straight into `sound_playing`).
+    pub(crate) fn sound_command(&mut self, command: u8) {
+        self.sounds.push(crate::sound::Sound::Command(command));
     }
 }

@@ -8,20 +8,21 @@
 //! recent frame already started: a replayed frame starts only what's new, and cancels
 //! what it no longer asks for (a sound from a guess that didn't happen).
 //!
-//! No sound driver is ported yet; the front end only logs what it's asked for. Requests
-//! the port knows the ID of are made; the others are noted where they'd go (`StopSound`
-//! in `ending.rs`, `PlaySound_ChkPCM` and the level intro's music and typing in
-//! `intro.rs`, the lair's throw in `lair.rs`, the defeat sounds in `finale.rs`).
+//! Every request the ROM makes is made, in the same order: the tests check the engine's
+//! copy of the 68k `sound_queue` against RAM each frame. No sound driver is ported yet;
+//! the front end only logs what it's asked for.
 
 use std::collections::VecDeque;
 
 /// What the game asks of the sound driver.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Sound {
-    /// `PlaySound` with this ID (music, effects and voice samples share the numbering).
+    /// `PlaySound` with this ID (music, effects and voice samples share the numbering;
+    /// `StopSound` is $6F then $FE).
     Play(u8),
-    /// `StopSound`.
-    Stop,
+    /// A byte written straight to `sound_playing`, skipping the queue: `FadeSound` $FD,
+    /// `PauseSound` / `UnpauseSound` $FF, `StopSFX` $6F.
+    Command(u8),
 }
 
 /// What the sound player should do, for the frame that asked.

@@ -43,7 +43,7 @@ const LAMP_PLACES: u32 = 0x234B6;
 const OPT_MATCHES: usize = 0;
 const OPT_P1_KEYS: usize = 2;
 const OPT_P2_KEYS: usize = 5;
-const OPT_NO_SAMPLES: usize = 8;
+pub(super) const OPT_NO_SAMPLES: usize = 8;
 
 /// What a pad picked on the options screen (`.Select`).
 enum Picked {
@@ -115,6 +115,7 @@ impl Engine {
                 self.input_test_lamps(inputs);
                 let a_start = |h: u8| h & 0xC0 == 0xC0;
                 if a_start(inputs.pads[0].hold) || a_start(inputs.pads[1].hold) {
+                    self.play_sample(0); // loc_2345A
                     self.options_strings(0);
                     o.phase = 1;
                 }
@@ -129,11 +130,13 @@ impl Engine {
         let cursor = &mut o.cursors[pad];
         if press & 1 != 0 {
             *cursor = if *cursor == 0 { last } else { *cursor - 1 };
+            self.play_sample(0x42);
         } else if press & 2 != 0 {
             *cursor += 1;
             if *cursor > last {
                 *cursor = 0;
             }
+            self.play_sample(0x42);
         } else if press & 0x0C != 0 {
             let step: i8 = if press & 4 != 0 { -1 } else { 1 };
             match *cursor {
@@ -161,14 +164,17 @@ impl Engine {
                     *m = ((m.wrapping_sub(1) as i8).wrapping_add(step) as u8 & 7) + 1;
                 }
                 5 => self.options[OPT_NO_SAMPLES] ^= 0xFF,
-                _ => {}
+                _ => return Picked::Nothing,
             }
+            self.play_sample(0);
         } else if press & 0x70 != 0 {
-            match *cursor {
-                6 => return Picked::InputTest,
-                7 => return Picked::SoundTest,
-                _ => {}
-            }
+            let picked = match *cursor {
+                6 => Picked::InputTest,
+                7 => Picked::SoundTest,
+                _ => return Picked::Nothing,
+            };
+            self.play_sample(0);
+            return picked;
         }
         Picked::Nothing
     }

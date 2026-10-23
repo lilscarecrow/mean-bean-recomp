@@ -184,6 +184,7 @@ impl Engine {
                         let mask = 0xFu16 << (at * 4);
                         if p.password & mask != mask {
                             p.password |= mask;
+                            self.play_sample(0x41);
                         }
                     }
                 } else if press & 0x60 != 0 {
@@ -192,11 +193,13 @@ impl Engine {
                         7 => {
                             if p.slot != 3 {
                                 p.slot += 1;
+                                self.play_sample(0x41);
                             }
                         }
                         8 => {
                             if p.slot != 0 {
                                 p.slot -= 1;
+                                self.play_sample(0x41);
                             }
                         }
                         9 => self.check_password(&mut p),
@@ -207,12 +210,14 @@ impl Engine {
                             }
                             let r = p.password.rotate_right(u32::from(at * 4));
                             p.password = ((r & 0xFFF0) | bean).rotate_left(u32::from(at * 4));
+                            self.play_sample(0x41);
                         }
                     }
                 } else if pad.repeat & 8 != 0 {
                     if p.cursor < 9 {
                         p.cursor += 1;
                         p.x = p.cursor * 0x1C + 0x8C;
+                        self.play_sample(0x42);
                     }
                 } else if pad.repeat & 4 != 0 {
                     if p.cursor == 0 {
@@ -220,6 +225,7 @@ impl Engine {
                     } else {
                         p.cursor -= 1;
                         p.x = p.cursor * 0x1C + 0x8C;
+                        self.play_sample(0x42);
                     }
                 }
             }
@@ -246,7 +252,10 @@ impl Engine {
             self.leave_password(p);
             return;
         }
-        let Some(n) = (0..0x30u32).rev().find(|&i| rom::word(PASSWORDS + i * 2) == p.password) else { return };
+        let Some(n) = (0..0x30u32).rev().find(|&i| rom::word(PASSWORDS + i * 2) == p.password) else {
+            self.play_sample(0x46); // (no such password)
+            return;
+        };
         self.password = p.password;
         self.difficulty_option = (n as u8 & 3) ^ 3;
         let stage = n >> 2;
@@ -254,6 +263,7 @@ impl Engine {
         for i in 0..=stage {
             self.opponents_defeated[usize::from(rom::byte(BEATEN + i))] = 0xFF;
         }
+        self.play_sample(0x5D);
         self.difficulty = [0, 2, 4, 6][usize::from(self.difficulty_option & 3)];
         if let Some(slot) = self.find_actor_slot() {
             let d = self.difficulty_option;
@@ -276,6 +286,7 @@ impl Engine {
 
     /// `loc_D394`: back to the main menu.
     fn leave_password(&mut self, p: &PasswordEntry) {
+        self.play_sample(0x49);
         self.level = p.cursor as u8;
         self.bytecode_flag = 6;
         self.bytecode_disabled = false;

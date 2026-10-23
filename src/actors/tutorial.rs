@@ -273,6 +273,7 @@ impl Engine {
                         self.popping[0] = true;
                         self.lesson = 5;
                         self.wipe_field(&mut p);
+                        self.play_sample(0x59);
                         next(&mut p, Wipe);
                     }
                 }
@@ -509,10 +510,13 @@ impl Engine {
         let w = rom::word(t.ptr);
         t.ptr += 2;
         if w >> 8 != 0xFF {
-            // sub_10058 (the typing sound every other character isn't ported)
+            // sub_10058, and the typing sound every other character
             self.plane_writes.push((t.at, w ^ 0x8000));
             t.at = t.at.wrapping_add(2);
             self.lesson_tick = self.lesson_tick.wrapping_add(1);
+            if self.lesson_tick & 1 == 0 {
+                self.play_sample(t.sound);
+            }
             t.wait = t.pace;
             return Some(t);
         }

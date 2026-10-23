@@ -9,7 +9,7 @@
 use super::*;
 use crate::rom;
 
-/// `loc_CB52`: three sounds $82, $82 and $C8 frames apart.
+/// `loc_CB52`: sound $6A three times, $82, $82 and $C8 frames apart, then $91.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DefeatSounds {
     pub stage: u8,
@@ -249,11 +249,12 @@ impl Engine {
             }
         }
         s.stage += 1;
-        s.count = match s.stage {
-            1 | 2 => 0x82,
-            3 => 0xC8,
-            _ => return None,
-        };
+        if s.stage > 3 {
+            self.play_sample(0x91);
+            return None;
+        }
+        self.play_sample(0x6A);
+        s.count = if s.stage == 3 { 0xC8 } else { 0x82 };
         Some(s)
     }
 

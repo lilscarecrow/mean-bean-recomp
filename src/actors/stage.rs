@@ -318,7 +318,7 @@ impl Engine {
                         return Ok(Some(r));
                     }
                     // loc_5C24: sound $63; sparkles unless much garbage is waiting.
-                    self.play_sound(0x63);
+                    self.play_sample(0x63);
                     let p1_slot = actor_slot(r.link);
                     let p2_slot = self.player_link(p1_slot);
                     let pending = self.player_mut(p1_slot).pending_garbage.wrapping_add(self.player_mut(p2_slot).pending_garbage);
@@ -882,10 +882,32 @@ impl Engine {
     /// `PuyoLandEffects`: on two stages, P2's pair touching down shakes its field.
     pub(super) fn land_effects(&mut self, player_id: u8) {
         if !matches!(self.opponent, OPP_FRANKLY | OPP_DRAGON) || player_id == 0 {
+            self.play_land_sound();
             return;
         }
+        self.play_sample(0x48); // SFX_PUYO_LAND_HARD
         let Some(slot) = self.free_slot() else { return };
-        self.slots[slot] = Some(Actor::ShakeField(ShakeField { angle: 0, strength: 0x400, scroll: VSCROLL_BUFFER + 0x34 }));
+        let scroll = VSCROLL_BUFFER + if self.swap_controls != 0 { 4 } else { 0x34 };
+        self.slots[slot] = Some(Actor::ShakeField(ShakeField { angle: 0, strength: 0x400, scroll }));
+    }
+
+    /// `PlayPuyoLandSound`, `PlayPuyoMoveSound`, `PlayPuyoRotateSound` (each picks the
+    /// same sound again on Robotnik's stage).
+    pub(super) fn play_land_sound(&mut self) {
+        self.play_sample(0x45);
+    }
+
+    /// A pair's frame: its move and turn sounds, then its landing's.
+    pub(super) fn pair_sounds(&mut self, player_id: u8, events: &crate::pair::PivotEvents) {
+        if events.moved {
+            self.play_sample(0x43);
+        }
+        if events.turned {
+            self.play_sample(0x44);
+        }
+        if events.touched_down {
+            self.land_effects(player_id);
+        }
     }
 
     pub(super) fn run_shake_field(&mut self, mut s: ShakeField) -> Option<ShakeField> {

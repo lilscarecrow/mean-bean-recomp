@@ -5,7 +5,8 @@
 //! $F1 / $F2 by their player) neither run nor draw, its field's tiles are saved and
 //! blanked (`PausePuyoField`), PAUSE blinks over it (`ActPause`), and with both sides
 //! paused the referee plays its own animation (`loc_5E86`). Each toggle waits for the
-//! next vertical blank (`VSync`) before going on.
+//! next vertical blank (`VSync`) before going on, and then sounds: in exercise mode
+//! $54 each time, otherwise `PauseSound` / `UnpauseSound` (once each per check).
 
 use super::*;
 use crate::assets::planes::FIELD_ORIGIN;
@@ -72,9 +73,13 @@ impl Engine {
     /// `CheckPause`. True when this frame ends in its wait for the vertical blank.
     pub(super) fn check_pause(&mut self) -> bool {
         let press = self.pause_press;
+        if let Some(paused) = self.pause_sound.take() {
+            self.pause_sounds(paused);
+        }
         let (side, d1) = match self.pause_next.take() {
             Some(rest) => rest,
             None => {
+                self.pause_sounds_sent = 0; // (d2's upper bits)
                 let (mut d0, mut d1) = (press[0], press[1]);
                 if self.swap_controls != 0 {
                     std::mem::swap(&mut d0, &mut d1);
@@ -102,12 +107,26 @@ impl Engine {
         false
     }
 
+    /// After the toggle's `VSync`.
+    fn pause_sounds(&mut self, paused: bool) {
+        if self.level_mode & 2 != 0 {
+            self.play_sample(0x54); // SFX_GARBAGE_1
+            return;
+        }
+        let bit = if paused { 1 } else { 2 };
+        if self.pause_sounds_sent & bit == 0 {
+            self.pause_sounds_sent |= bit;
+            self.sound_command(0xFF); // PauseSound / UnpauseSound
+        }
+    }
+
     /// `CheckPlayerPause`. True when the side's pause changed.
     fn toggle_pause(&mut self, side: usize, press: u8) -> bool {
         if self.player_flags[side] == 0 || press & 0x80 == 0 {
             return false;
         }
         self.player_flags[side] ^= 0x80;
+        self.pause_sound = Some(self.player_flags[side] & 0x80 != 0);
         let at = FIELD_ORIGIN[(side ^ usize::from(self.swap_controls)) & 1];
         let event = |e: &mut Engine, what: VdpOp| e.vdp_events.push(VdpEvent { at: e.plane_writes.len(), what });
         let field = VdpOp::SaveBox { at, cols: FIELD_COLS, rows: FIELD_ROWS, row: 0x80, buffer: 1 + side as u8 };
