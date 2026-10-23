@@ -22,6 +22,9 @@ use bean_machine::netplay::{self, Session, State};
 use bean_machine::overlay::{self, Canvas};
 use bean_machine::rollback::{self, Rollback};
 use bean_machine::sound::Cue;
+use bevy::audio::AddAudioSource;
+use std::collections::VecDeque;
+use std::sync::{Arc, Mutex};
 use bean_machine::{pad, render, rom};
 use bevy::asset::RenderAssetUsages;
 use bevy::image::ImageSampler;
@@ -154,6 +157,7 @@ fn main() {
         .insert_resource(Time::<Fixed>::from_hz(60.0))
         .insert_resource(Settings { port: args.host.unwrap_or(netplay::DEFAULT_PORT), delay: args.delay.unwrap_or(netplay::DEFAULT_DELAY) })
         .insert_resource(Start(start))
+        .add_audio_source::<Speaker>()
         .add_systems(Startup, setup)
         .add_systems(FixedUpdate, step)
         .add_systems(Update, (ui, show).chain())
@@ -166,7 +170,16 @@ struct Settings {
     delay: u8,
 }
 
-fn setup(mut commands: Commands, mut images: ResMut<Assets<Image>>, settings: Res<Settings>, mut start: ResMut<Start>) {
+fn setup(
+    mut commands: Commands,
+    mut images: ResMut<Assets<Image>>,
+    mut speakers: ResMut<Assets<Speaker>>,
+    settings: Res<Settings>,
+    mut start: ResMut<Start>,
+) {
+    let buffer = Arc::new(Mutex::new(VecDeque::new()));
+    let speaker = speakers.add(Speaker { buffer: buffer.clone(), mute: std::env::var_os("MBM_MUTE").is_some() });
+    commands.spawn(AudioPlayer(speaker));
     let mut image = Image::new(
         Extent3d { width: render::WIDTH as u32, height: render::HEIGHT as u32, depth_or_array_layers: 1 },
         TextureDimension::D2,
@@ -195,7 +208,7 @@ fn setup(mut commands: Commands, mut images: ResMut<Assets<Image>>, settings: Re
         port: settings.port,
         delay: settings.delay,
         ticks: 0,
-        audio: Audio::new(),
+        audio: Audio::new(buffer),
         title: TITLE.into(),
     };
     if let Some(action) = start.0.take() {
@@ -299,34 +312,99 @@ fn play_online(net: &mut Online, mine: u8) {
     }
 }
 
-/// Where the game's sounds go (see [`bean_machine::sound`]). No sound driver is ported
-/// yet: with `MBM_SOUND_LOG` set, the requests are printed instead.
+/// Where the game's sounds go: the ported sound driver and chips
+/// ([`bean_machine::audio`]), a frame of samples each step, into the buffer the audio
+/// output plays from. With `MBM_SOUND_LOG` set the requests are printed too;
+/// `MBM_MUTE` keeps it quiet.
 struct Audio {
     log: bool,
     /// Frames played offline (to number their cues).
     frame: u32,
+    chips: bean_machine::audio::Audio,
+    out: Arc<Mutex<VecDeque<f32>>>,
 }
 
+/// The output's rate, and the rate the chips are rendered at: a frame of the console's
+/// (59.92 Hz) in exactly a step's samples (60 Hz), the 0.13% the game runs fast.
+const OUTPUT_HZ: u32 = 48_000;
+const RENDER_HZ: u32 = (OUTPUT_HZ as f64 / 60.0 * (bean_machine::audio::MASTER_HZ / bean_machine::audio::FRAME_CLOCKS as f64)) as u32;
+/// At most this many frames of samples wait to be played (more and the oldest go).
+const BUFFERED_FRAMES: usize = 6;
+
 impl Audio {
-    fn new() -> Audio {
-        Audio { log: std::env::var_os("MBM_SOUND_LOG").is_some(), frame: 0 }
+    fn new(out: Arc<Mutex<VecDeque<f32>>>) -> Audio {
+        Audio { log: std::env::var_os("MBM_SOUND_LOG").is_some(), frame: 0, chips: bean_machine::audio::Audio::new(RENDER_HZ), out }
     }
 
     /// An offline frame's requests: all of them, once.
     fn frame(&mut self, sounds: &[bean_machine::sound::Sound]) {
         let frame = self.frame;
-        self.frame += 1;
         let cues: Vec<Cue> = sounds.iter().map(|&sound| Cue { frame, sound, cancel: false }).collect();
         self.cues(&cues);
     }
 
-    /// What to start or cancel (over the network, after rollback has sorted out replays).
+    /// A frame's worth of what to start or cancel (over the network, after rollback has
+    /// sorted out replays: a sound already started can't be taken back, so cancels only
+    /// show in the log).
     fn cues(&mut self, cues: &[Cue]) {
+        self.frame += 1;
         if self.log {
             for c in cues {
                 eprintln!("sound: frame {} {}{:?}", c.frame, if c.cancel { "cancel " } else { "" }, c.sound);
             }
         }
+        let sounds: Vec<bean_machine::sound::Sound> = cues.iter().filter(|c| !c.cancel).map(|c| c.sound).collect();
+        let samples = self.chips.frame(&sounds);
+        let mut out = self.out.lock().unwrap();
+        out.extend(samples.iter().copied());
+        let most = BUFFERED_FRAMES * (OUTPUT_HZ as usize / 60) * 2;
+        while out.len() > most {
+            out.pop_front();
+        }
+    }
+}
+
+/// The audio output's source: whatever the game has rendered (silence when it's behind).
+#[derive(Asset, TypePath, Clone)]
+struct Speaker {
+    buffer: Arc<Mutex<VecDeque<f32>>>,
+    mute: bool,
+}
+
+struct SpeakerStream(Speaker);
+
+impl Iterator for SpeakerStream {
+    type Item = bevy::audio::Sample;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let s = self.0.buffer.lock().unwrap().pop_front().unwrap_or(0.0);
+        Some(if self.0.mute { 0.0 } else { s })
+    }
+}
+
+impl bevy::audio::Source for SpeakerStream {
+    fn current_span_len(&self) -> Option<usize> {
+        None
+    }
+
+    fn channels(&self) -> bevy::audio::ChannelCount {
+        bevy::audio::ChannelCount::new(2).unwrap()
+    }
+
+    fn sample_rate(&self) -> bevy::audio::SampleRate {
+        bevy::audio::SampleRate::new(OUTPUT_HZ).unwrap()
+    }
+
+    fn total_duration(&self) -> Option<std::time::Duration> {
+        None
+    }
+}
+
+impl bevy::audio::Decodable for Speaker {
+    type Decoder = SpeakerStream;
+
+    fn decoder(&self) -> Self::Decoder {
+        SpeakerStream(self.clone())
     }
 }
 

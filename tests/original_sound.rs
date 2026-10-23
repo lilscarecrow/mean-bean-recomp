@@ -107,6 +107,12 @@ fn commands(path: &Path, cues: &std::collections::HashMap<usize, u8>) -> Vec<(us
     const CURRENT: u32 = 0xFF_113D;
     const QUEUE: u32 = 0xFF_113E;
     let rec = path.with_extension("ramrec");
+    if !rec.exists() {
+        // (no 68000 recording: the pokes alone)
+        let mut out: Vec<(usize, u8)> = cues.iter().map(|(&f, &id)| (f, id)).collect();
+        out.sort();
+        return out;
+    }
     let mut out = vec![];
     let mut prev: Option<support::Ram> = None;
     for (f, ram) in support::frames(&rec).enumerate() {
