@@ -29,6 +29,7 @@ mod special;
 mod music;
 mod pause;
 mod soundtest;
+mod boot;
 mod credits;
 mod ending;
 mod epilogue;
@@ -56,6 +57,7 @@ pub use exercise::*;
 pub use special::*;
 pub use pause::*;
 pub use soundtest::*;
+pub use boot::*;
 pub use credits::*;
 pub use ending::*;
 pub use epilogue::*;
@@ -98,13 +100,16 @@ const POP_SOUNDS: u32 = 0x4AD8;
 const COMBO_VOICES: u32 = 0x23584;
 const GARBAGE_SOUNDS: u32 = 0x23748;
 const GARBAGE_POINTS: u32 = 70;
-/// Scenario mode fall rate and beans to the next speed-up, by speed step (`unk_9DC4`).
-const SCENARIO_SPEEDS: [(u16, u16); 24] = [
-    (0x0400, 0x20), (0x0400, 0x20), (0x0500, 0x20), (0x0500, 0x20), (0x0600, 0x20), (0x0800, 0x20),
-    (0x0A00, 0x20), (0x0C00, 0x28), (0x1000, 0x28), (0x2000, 0x30), (0x3000, 0x30), (0x4000, 0x38),
-    (0x4800, 0x38), (0x5000, 0x40), (0x6000, 0x40), (0x8000, 0xFFFF), (0x8000, 0xFFFF), (0x8000, 4),
-    (0x8000, 4), (0x8000, 4), (0xA000, 4), (0xC000, 4), (0xE000, 4), (0xFE00, 0xFFFF),
-];
+/// Scenario mode fall rate and beans to the next speed-up, by speed step (`unk_9DC4`:
+/// 24 entries, the last two waiting on $FFFF beans; a byte-sized step reads on past
+/// them).
+const SCENARIO_SPEEDS: u32 = 0x9DC4;
+
+/// A speed step's (fall rate, beans to the next).
+pub(super) fn scenario_speed(step: u8) -> (u16, u16) {
+    let at = SCENARIO_SPEEDS + u32::from(step) * 4;
+    (crate::rom::word(at), crate::rom::word(at + 2))
+}
 /// Player flag set while beans fall after a pop.
 const FALLING_AFTER_POP: u8 = 0x10;
 
@@ -253,6 +258,8 @@ pub enum Actor {
     PauseSign(PauseSign),
     RefereePause(RefereePause),
     SoundTest(SoundTest),
+    RegionLockout(RegionLockout),
+    ChecksumError(ChecksumError),
     LessonHelper(LessonHelper),
     LessonText(LessonText),
     LessonPad(LessonPad),
@@ -389,6 +396,8 @@ impl Actor {
             Actor::MainMenu(m) => Some(m.code()),
             Actor::MenuClouds(_) => Some(MENU_CLOUDS_CODE),
             Actor::Options(o) => Some(o.code()),
+            Actor::RegionLockout(l) => Some(l.code()),
+            Actor::ChecksumError(c) => Some(if c.started { CHECKSUM_ERROR_WAIT_CODE } else { CHECKSUM_ERROR_CODE }),
             Actor::PasswordEntry(p) => Some(p.code()),
             Actor::PasswordSprite(s) => Some(s.kind.code()),
             Actor::PrologueControl => Some(PROLOGUE_CONTROL_CODE),
@@ -1304,6 +1313,10 @@ pub struct Engine {
     pub high_score_both: bool,
     /// `sound_test_enabled` ($FFFC02): set by beating the game.
     pub sound_test: u16,
+    /// The console's version byte (`CONSOLE_VER`: bit 7 overseas, bit 6 PAL; $80 a US
+    /// console), and `word_FF0106`, the ROM's checksum as `CheckChecksum` summed it.
+    pub console: u8,
+    pub rom_checksum: u16,
     /// `dword_FF112C`: the clouds' slot.
     pub clouds_slot: usize,
     /// The slot of the actor that took a long step (decompression) this frame, for
@@ -1450,6 +1463,8 @@ impl Engine {
             unported_note: None,
             high_score_both: false,
             sound_test: 0,
+            console: 0x80,
+            rom_checksum: 0,
             clouds_slot: 0,
             long_actor: None,
             fireworks_stop: 0,
@@ -1753,6 +1768,8 @@ impl Engine {
                 Actor::MainMenu(m) => self.run_main_menu(m, inputs).map(Actor::MainMenu),
                 Actor::MenuClouds(c) => self.run_menu_clouds(c).map(Actor::MenuClouds),
                 Actor::Options(o) => self.run_options(o, inputs).map(Actor::Options),
+                Actor::RegionLockout(l) => self.run_region_lockout(l, inputs).map(Actor::RegionLockout),
+                Actor::ChecksumError(c) => self.run_checksum_error(c, inputs).map(Actor::ChecksumError),
                 Actor::PasswordEntry(p) => self.run_password_entry(p, inputs).map(Actor::PasswordEntry),
                 Actor::PasswordSprite(s) => self.run_password_sprite(s).map(Actor::PasswordSprite),
                 Actor::PasswordColors(c) => self.run_password_colors(c).map(Actor::PasswordColors),
@@ -2530,8 +2547,7 @@ impl Engine {
             self.exercise_fall_rate(p);
             return Ok(());
         }
-        let step = p.speed_index.saturating_sub(self.difficulty) as usize;
-        let &(speed, threshold) = SCENARIO_SPEEDS.get(step).ok_or(Unported("speed step past unk_9DC4"))?;
+        let (speed, threshold) = scenario_speed(p.speed_index.saturating_sub(self.difficulty));
         p.fall_speed = speed;
         p.threshold = threshold;
         Ok(())

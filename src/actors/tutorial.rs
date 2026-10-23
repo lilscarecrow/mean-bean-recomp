@@ -247,7 +247,7 @@ impl Engine {
                 self.difficulty = 0;
                 p.speed_index = 7;
                 // loc_9CF8
-                let &(speed, threshold) = SCENARIO_SPEEDS.get(usize::from(p.speed_index)).ok_or(Unported("speed step past unk_9DC4"))?;
+                let (speed, threshold) = scenario_speed(p.speed_index);
                 p.fall_speed = speed;
                 p.threshold = threshold;
                 next(&mut p, Next);

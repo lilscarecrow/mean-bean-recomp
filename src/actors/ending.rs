@@ -162,22 +162,28 @@ pub struct PasswordBean {
 pub const PASSWORD_BEAN_CODE: u32 = 0x1A318;
 
 impl Engine {
-    /// `loc_79FC`: the player's pair can't spawn.
+    /// `loc_79FC`: the player's pair can't spawn. `off_7AA4` by `level_mode` (outside
+    /// scenario mode without the StopSound pause).
     pub(super) fn top_out(&mut self, p: &mut Player) -> Result<(), Unported> {
-        if self.level_mode == 1 {
-            // (no StopSound pause)
-            self.vs_round_lost(p);
-            return Ok(());
+        match self.level_mode {
+            0 => {
+                self.stop_sound();
+                p.state = PlayerState::TopOut; // (the next frame)
+            }
+            1 => self.vs_round_lost(p),
+            // (3: the options' mode, never a match)
+            2 | 3 => self.exercise_topped_out(p),
+            _ => {
+                // loc_7AB8, the attract demo: the other player goes and the game flow
+                // goes on (clearing the actors next frame, so the field never finishes
+                // falling away).
+                self.delete_player(p.other_slot);
+                self.bytecode_flag = 0;
+                self.bytecode_disabled = false;
+                self.wipe_field(p);
+                p.state = PlayerState::Wipe;
+            }
         }
-        if self.level_mode == 2 {
-            self.exercise_topped_out(p);
-            return Ok(());
-        }
-        if self.level_mode >= 1 {
-            return Err(Unported("top-out outside scenario mode (loc_7A12)"));
-        }
-        self.stop_sound();
-        p.state = PlayerState::TopOut; // (the next frame)
         Ok(())
     }
 

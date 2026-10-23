@@ -101,8 +101,9 @@ pub struct Referee {
 const IDLE_SCRIPTS: u32 = 0x3334;
 /// `sub_5EE8`: every other idle is this one.
 const IDLE_ALTERNATE: u16 = 0x1E;
-/// Sideways steps for frames $41.. (`unk_5D04`).
-const REFEREE_STEPS: [u16; 4] = [0xFFFE, 0x0002, 0xFFFC, 0x0004];
+/// Sideways steps for frames $41.. (`unk_5D04`: four words; a later frame reads on into
+/// the code after them, by a byte-sized index).
+const REFEREE_STEPS: u32 = 0x5D04;
 
 /// `sub_602C`: a start sparkle (`sub_5FAA`).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -414,8 +415,8 @@ impl Engine {
                         r.flags |= 1;
                         r.bob = 0x20;
                     } else if frame > 0x40 {
-                        let step = REFEREE_STEPS.get(usize::from(frame - 0x41)).ok_or(Unported("referee step cue"))?;
-                        r.x = r.x.wrapping_add(*step).clamp(0x108, 0x138);
+                        let step = rom::word(REFEREE_STEPS + u32::from(frame.wrapping_sub(0x41).wrapping_shl(1)));
+                        r.x = r.x.wrapping_add(step).clamp(0x108, 0x138);
                     }
                 }
             }

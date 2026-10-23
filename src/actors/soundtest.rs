@@ -1,6 +1,6 @@
 //! The sound test (`BC_SoundTest`, from the options' last line, which only shows while
-//! `sound_test_enabled` is set: on this cartridge only on a Japanese console, where it
-//! won't run at all, so in practice never). Six rows: three sound effects, the music,
+//! `sound_test_enabled` is set: on this cartridge only on a Japanese console, past the
+//! region lockout's code, see `boot.rs`). Six rows: three sound effects, the music,
 //! a voice and a driver command; UP/DOWN pick a row, LEFT/RIGHT its value (shown in
 //! hex, blinking on the row picked; the last three with their names), A/B play it, C
 //! stops the sound, START goes back to the options.
@@ -140,7 +140,7 @@ impl Engine {
         };
         // .MoveSelection (the music row has $1A values on a Japanese console)
         let row = usize::from(t.row);
-        let size = rom::byte(ROW_SIZES + row as u32);
+        let size = if row == 3 && self.console & 0xC0 == 0 { 0x1A } else { rom::byte(ROW_SIZES + row as u32) };
         let mut v = t.values[row].wrapping_add(step as u8);
         if v & 0x80 != 0 {
             v = size.wrapping_sub(1);

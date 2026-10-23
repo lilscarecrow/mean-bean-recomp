@@ -20,6 +20,23 @@ use support::actors::*;
 use support::{frames, recordings, Ram, FRAME_COUNT, P1, P1_CTRL, P1_KEYS, P2};
 
 const RNG_SEED: u32 = 0xFF_1116;
+
+thread_local! {
+    /// The console the recording was made on (`<recording>.region`: ntsc-j, pal; a US one
+    /// without), as `CONSOLE_VER`'s top bits.
+    static CONSOLE: std::cell::Cell<u8> = const { std::cell::Cell::new(0x80) };
+}
+
+fn set_console(path: &std::path::Path) {
+    let mut p = path.as_os_str().to_owned();
+    p.push(".region");
+    let console = match std::fs::read_to_string(p).unwrap_or_default().trim() {
+        "ntsc-j" => 0x00,
+        "pal" => 0xC0,
+        _ => 0x80,
+    };
+    CONSOLE.with(|c| c.set(console));
+}
 const AI_FIELD: [u32; 2] = [0xFF_1D62, 0xFF_20CC];
 const CPU_MEMORY: [u32; 2] = [0xFF_1D4E, 0xFF_1D58];
 const CPU_READS: u32 = 0xFF_1D0A;
@@ -98,6 +115,7 @@ fn flow_from(e: &mut Engine, ram: &Ram) {
     e.sound_queue = ram.bytes(SOUND_QUEUE, 0x100).try_into().unwrap();
     e.sound_tail = ram.u8(SOUND_TAIL);
     e.level_music = ram.u8(0xFF_111A);
+    e.rom_checksum = ram.u16(0xFF_0106);
     e.swap_controls = ram.u8(0xFF_1966);
     e.use_plane_a_buffer = ram.u16(0xFF_1956) != 0;
     e.word_112c = ram.u16(0xFF_112C);
@@ -150,6 +168,7 @@ struct FlowSnap {
     sound_test: u16,
     sound: (u8, Vec<u8>),
     music: u8,
+    checksum: u16,
 }
 
 /// `sound_queue_tail`, `sound_queue`.
@@ -180,6 +199,7 @@ fn flow_snap(e: &Engine) -> FlowSnap {
         sound_test: e.sound_test,
         sound: (e.sound_tail, e.sound_queue.to_vec()),
         music: e.level_music,
+        checksum: e.rom_checksum,
     }
 }
 
@@ -207,6 +227,7 @@ fn flow_snap_ram(ram: &Ram) -> FlowSnap {
         sound_test: ram.u16(0xFF_FC02),
         sound: (ram.u8(SOUND_TAIL), ram.bytes(SOUND_QUEUE, 0x100).to_vec()),
         music: ram.u8(0xFF_111A),
+        checksum: ram.u16(0xFF_0106),
     }
 }
 
@@ -215,6 +236,7 @@ const VSCROLL: u32 = 0xFF_05D2;
 
 fn globals_from(ram: &Ram) -> Engine {
     let mut e = Engine::new();
+    e.console = CONSOLE.with(|c| c.get());
     e.score_at = ram.u16(0xFF_198A);
     e.p1_paused = ram.u8(0xFF_0143);
     e.pause_press = [ram.u8(P1_CTRL + 1), ram.u8(P1_CTRL + 7)];
@@ -949,6 +971,7 @@ fn whole_matches_run_on_the_engine_alone() {
     let mut matches = 0;
     let mut stops = std::collections::BTreeMap::<String, usize>::new();
     for path in recordings() {
+        set_console(&path);
         let poked = support::poked_frames(&path);
         let all: Vec<Ram> = frames(&path).collect();
         let waiting = |r: &Ram| [P1, P2].iter().all(|&t| r.player_actor(t).is_some_and(|a| r.code(a) == PLAYER_WAITING));
@@ -964,8 +987,17 @@ fn whole_matches_run_on_the_engine_alone() {
                 })
         };
         let mid_start = (0..all.len().min(600)).find(|&f| !poked.contains(&f) && match_running(&all[f]));
+        // And after a test scenario wrote RAM in a match: its first frame we can load
+        // with no beans falling after a pop (their fall isn't in RAM).
+        let settled = |r: &Ram| {
+            engine_from(r).is_ok_and(|e| e.slots.iter().all(|s| !matches!(s, Some(Actor::Player(p)) if p.flags & 0x10 != 0)))
+        };
+        let after_pokes: std::collections::HashSet<usize> = poked
+            .iter()
+            .filter_map(|&p| (p + 1..all.len().min(p + 600)).find(|&f| !poked.contains(&f) && match_running(&all[f]) && settled(&all[f])))
+            .collect();
         for f in 0..all.len() {
-            let mid_match = Some(f) == mid_start;
+            let mid_match = Some(f) == mid_start || after_pokes.contains(&f);
             // And the game flow right after the opponent screen (bytecode at $1D3E, no
             // actors): the stage intro, the transition, the match after.
             let at_intro = |r: &Ram| r.u32(0xFF_0A36) == 0x1D3E && r.u8(0xFF_0A3B) == 0 && !r.actors().any(|a| used(r, slot_of(a)));
@@ -1052,6 +1084,7 @@ fn matches_start_from_the_settings_alone() {
     let (mut started, mut stops) = (0, std::collections::BTreeMap::<String, usize>::new());
     let mut opponents = std::collections::BTreeMap::<u8, usize>::new();
     for path in recordings() {
+        set_console(&path);
         let poked = support::poked_frames(&path);
         let all: Vec<Ram> = frames(&path).collect();
         for s in match_setups(&all) {
@@ -1177,6 +1210,7 @@ fn screen_planes_match_vdp_snapshots() {
     let src = RomAssets::new().unwrap();
     let (mut run, mut compared) = (Run::default(), 0);
     for path in recordings() {
+        set_console(&path);
         let stem = path.file_stem().unwrap().to_string_lossy().to_string();
         let out = path.parent().unwrap().parent().unwrap();
         let prefix = format!("{stem}_");

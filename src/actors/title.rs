@@ -1,5 +1,4 @@
-//! Power-on to the main menu: the boot checks (`GetRegion`, `CheckChecksum`: a US
-//! cartridge that passes), the Sega logo (`ActSegaLogo`: it slides in, its outline
+//! Power-on to the main menu (after the boot checks, see `boot.rs`): the Sega logo (`ActSegaLogo`: it slides in, its outline
 //! brightens, its colors cycle; START skips) and the title (`InitTitle`).
 //!
 //! The title is a state in `word_FF1126`: 0 while Robotnik's machine is shown being
@@ -256,15 +255,8 @@ const FONT: u32 = 0x11258;
 impl Engine {
     pub(super) fn run_title_routine(&mut self, at: u32) -> bool {
         match at {
-            // GetRegion: a US console (the flag's clear).
-            0x224B8 => self.bytecode_flag = 0,
             // InitDebugFlags
             0x279E => self.control_player_1 = 0xFF,
-            // CheckChecksum: it takes a while; it passes.
-            0x234D6 => {
-                self.long_step();
-                self.bytecode_flag = 0;
-            }
             // LoadSegaLogo
             0xB324 => {
                 if let Some(slot) = self.find_actor_slot() {
@@ -435,8 +427,8 @@ impl Engine {
 
     /// `ActTitleHandler`.
     pub(super) fn run_title_handler(&mut self, inputs: &Inputs) -> bool {
-        // CheckIfJapan: on other consoles sound_test_enabled flips straight back.
-        self.sound_test = 0;
+        // CheckIfJapan: set, and on other than a Japanese console it flips straight back.
+        self.sound_test = if self.console & 0xC0 == 0 { 0xFFFF } else { 0 };
         let press = (inputs.pads[0].press | inputs.pads[1].press) & 0xF0;
         if press == 0 {
             return true;

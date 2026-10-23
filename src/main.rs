@@ -4,7 +4,8 @@
 //!
 //! Usage: `bean-machine [path to the ROM]` (or set `MBM_ROM`). Arrows move, Z/X/C are
 //! A/B/C (turn), Enter is Start. Esc quits. The sound is the ROM's own driver, ported;
-//! `MBM_MUTE=1` silences it.
+//! `MBM_MUTE=1` silences it. `MBM_CONSOLE=jp` / `eu` plays it on a Japanese / European
+//! console (this US cartridge's region lockout).
 //!
 //! Not in the ROM: NETWORK on the main menu plays 1P vs 2P with someone on another
 //! machine (see [`bean_machine::netplay`] and [`bean_machine::netmenu`]). One player
@@ -197,7 +198,7 @@ fn setup(
         ..default()
     });
     let mut front = Front {
-        game: Game::boot(BOOT_SEED).expect("starting the game"),
+        game: boot(BOOT_SEED).expect("starting the game"),
         screen,
         linger: 0,
         menu: NetMenu::new(),
@@ -409,6 +410,19 @@ impl bevy::audio::Decodable for Speaker {
     }
 }
 
+/// Power-on, on the console `MBM_CONSOLE` names: `us` (the default), `jp` (the region
+/// lockout, which a code on pad 2 gets past; then the sound test is in the options) or
+/// `eu` (the lockout for good).
+fn boot(seed: u32) -> Result<Game, String> {
+    let mut g = Game::boot(seed)?;
+    g.engine.console = match std::env::var("MBM_CONSOLE").unwrap_or_default().to_lowercase().as_str() {
+        "jp" => 0x00,
+        "eu" => 0xC0,
+        _ => 0x80,
+    };
+    Ok(g)
+}
+
 /// One frame of the game. When the flow reaches something not ported yet, it says so
 /// (in the title) for a second, then powers on again.
 fn play_frame(game: &mut Game, linger: &mut u32, seed: u32, pads: [u8; 2]) {
@@ -416,7 +430,7 @@ fn play_frame(game: &mut Game, linger: &mut u32, seed: u32, pads: [u8; 2]) {
     if let Status::Stopped(_) = game.status {
         *linger += 1;
         if *linger > 60 {
-            if let Ok(g) = Game::boot(seed) {
+            if let Ok(g) = boot(seed) {
                 *game = g;
             }
             *linger = 0;

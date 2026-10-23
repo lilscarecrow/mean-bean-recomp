@@ -41,11 +41,11 @@ impl Engine {
                 _ => d(0x80, v.color as u8, v.pair.pivot_anim.frame, pivot_x(v), hi(v.y)),
             },
             Actor::Satellite(s) => {
-                let frame = match (s.state, &self.slots[s.pivot_slot]) {
+                let frame = match (s.state, self.slots.get(s.pivot_slot).unwrap_or(&None)) {
                     (SatelliteState::Init | SatelliteState::Follow, Some(Actor::Pivot(p))) => p.pair.sat_anim.frame,
                     _ => s.anim.frame,
                 };
-                let hidden = matches!(&self.slots[s.pivot_slot], Some(Actor::Pivot(p)) if p.state == PivotState::Hidden);
+                let hidden = matches!(self.slots.get(s.pivot_slot).unwrap_or(&None), Some(Actor::Pivot(p)) if p.state == PivotState::Hidden);
                 // (not run yet: a fresh slot but for its color)
                 let fresh = s.state == SatelliteState::Init;
                 d(if hidden || fresh { 0 } else { 0x80 }, s.color as u8, if fresh { 0 } else { frame }, s.x, hi(s.y))

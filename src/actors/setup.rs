@@ -249,8 +249,7 @@ impl Engine {
             p.state = PlayerState::WaitStart;
             return Ok(());
         }
-        let step = p.speed_index.saturating_sub(self.difficulty) as usize;
-        let &(speed, threshold) = SCENARIO_SPEEDS.get(step).ok_or(Unported("speed step past unk_9DC4"))?;
+        let (speed, threshold) = scenario_speed(p.speed_index.saturating_sub(self.difficulty));
         p.fall_speed = speed;
         p.threshold = threshold;
         p.state = PlayerState::WaitStart;

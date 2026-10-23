@@ -774,6 +774,18 @@ fn load_stage(ram: &Ram, a: u32, code: u32) -> Option<Actor> {
             step_b: ram.u8(a + 0x2B),
         }),
         PROLOGUE_CONTROL_CODE => Actor::PrologueControl,
+        LOCKOUT_CODE | LOCKOUT_CHECK_CODE | LOCKOUT_STUCK_CODE => Actor::RegionLockout(RegionLockout {
+            state: match code {
+                LOCKOUT_CODE => LockoutState::Start,
+                LOCKOUT_CHECK_CODE => LockoutState::Check,
+                _ => LockoutState::Stuck,
+            },
+            index: ram.u16(a + 0x26),
+            timer: ram.u16(a + 0x28),
+        }),
+        CHECKSUM_ERROR_CODE | CHECKSUM_ERROR_WAIT_CODE => {
+            Actor::ChecksumError(ChecksumError { started: code == CHECKSUM_ERROR_WAIT_CODE, delay: ram.u16(a + 0x24) })
+        }
         SOUND_TEST_CODE | SOUND_TEST_UPDATE_CODE => Actor::SoundTest(SoundTest {
             started: code == SOUND_TEST_UPDATE_CODE,
             row: ram.u16(a + 0x26),
@@ -1341,6 +1353,8 @@ pub fn describe(actor: &Actor) -> String {
         Actor::CoinSign => "coin sign".into(),
         Actor::Dissolve(d) => format!("{d:X?}"),
         Actor::SoundTest(t) => format!("{t:X?}"),
+        Actor::RegionLockout(l) => format!("{l:X?}"),
+        Actor::ChecksumError(c) => format!("{c:X?}"),
         Actor::PauseSign(s) => format!("{s:X?}"),
         Actor::RefereePause(p) => format!("{p:X?}"),
         Actor::Special(s) => format!("{s:X?}"),
