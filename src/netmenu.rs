@@ -231,7 +231,7 @@ impl NetMenu {
 }
 
 /// Splits `s` into lines of at most `width` characters, at spaces where it can.
-fn wrap(s: &str, width: usize) -> Vec<String> {
+pub(crate) fn wrap(s: &str, width: usize) -> Vec<String> {
     let mut lines: Vec<String> = vec![];
     for word in s.split_whitespace() {
         match lines.last_mut() {

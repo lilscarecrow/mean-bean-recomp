@@ -15,6 +15,7 @@ pub mod audio;
 pub mod bean_order;
 pub mod field;
 pub mod game;
+pub mod locate;
 pub mod motion;
 pub mod netmenu;
 pub mod netplay;

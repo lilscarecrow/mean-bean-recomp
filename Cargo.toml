@@ -6,6 +6,8 @@ edition = "2024"
 [dependencies]
 # 0.20 needs Rust 1.97.1; 0.19 builds on 1.95.
 bevy = "0.19"
+# The ROM screen's BROWSE button (the system's own file picker).
+rfd = "0.15"
 
 # Fast-ish debug builds: optimize dependencies (Bevy), keep our own code quick to compile.
 [profile.dev]

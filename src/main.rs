@@ -2,7 +2,9 @@
 //! title, menus, scenario mode) on the ported engine, with everything read from your own
 //! ROM.
 //!
-//! Usage: `bean-machine [path to the ROM]` (or set `MBM_ROM`). Arrows move, Z/X/C are
+//! Usage: `bean-machine [path to the ROM]` (or set `MBM_ROM`). Without either, it uses
+//! the ROM from the last run, or asks for it on a screen of its own
+//! ([`bean_machine::locate`]) and remembers it from then on. Arrows move, Z/X/C are
 //! A/B/C (turn), Enter is Start. Esc quits. The sound is the ROM's own driver, ported;
 //! `MBM_MUTE=1` silences it. `MBM_CONSOLE=jp` / `eu` plays it on a Japanese / European
 //! console (this US cartridge's region lockout).
@@ -19,6 +21,7 @@
 use std::path::PathBuf;
 
 use bean_machine::game::{Game, Status};
+use bean_machine::locate::{self, Locate};
 use bean_machine::netmenu::{Action, Input, NetMenu, Screen};
 use bean_machine::netplay::{self, Session, State};
 use bean_machine::overlay::{self, Canvas};
@@ -33,6 +36,7 @@ use bevy::image::ImageSampler;
 use bevy::input::ButtonState;
 use bevy::input::keyboard::KeyboardInput;
 use bevy::prelude::*;
+use bevy::window::FileDragAndDrop;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 
 const SCALE: f32 = 3.0;
@@ -117,8 +121,10 @@ fn args() -> Result<Args, String> {
     Ok(out)
 }
 
+/// Where to look for the ROM: the command line, `MBM_ROM`, the last run's, then (for
+/// development) the research repository's.
 fn rom_path(args: &Args) -> Option<PathBuf> {
-    args.rom.clone().or_else(|| std::env::var_os("MBM_ROM").map(PathBuf::from)).or_else(|| {
+    args.rom.clone().or_else(|| std::env::var_os("MBM_ROM").map(PathBuf::from)).or_else(locate::saved).or_else(|| {
         let f = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../bean-machine-re/rom_path.txt");
         std::fs::read_to_string(f).ok().map(|s| PathBuf::from(s.trim()))
     })
@@ -135,19 +141,26 @@ struct Start(Option<Action>);
 
 fn main() {
     let args = args().unwrap_or_else(|e| fail(e));
-    let Some(path) = rom_path(&args) else {
-        fail("Pass the path to your Mean Bean Machine ROM (or set MBM_ROM).");
+    // Without a ROM that works, the ROM screen comes up first.
+    let path = rom_path(&args);
+    let finding = match path.as_deref().map(|p| (p, rom::install_from(p))) {
+        Some((p, Ok(()))) => {
+            remember(p);
+            None
+        }
+        Some((p, Err(e))) => Some(Finding::new(Locate::new(Some(p), Some(e)))),
+        None => Some(Finding::new(Locate::new(None, None))),
     };
-    if let Err(e) = rom::install_from(&path) {
-        fail(e);
-    }
     let start = match (args.host, args.join) {
         (Some(_), _) => Some(Action::Host),
         (_, Some(addr)) => Some(Action::Join(addr)),
         _ => None,
     };
-    App::new()
-        .add_plugins(DefaultPlugins.set(WindowPlugin {
+    let mut app = App::new();
+    if let Some(finding) = finding {
+        app.insert_resource(finding);
+    }
+    app.add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {
                 title: TITLE.into(),
                 resolution: ((render::WIDTH as f32 * SCALE) as u32, (render::HEIGHT as f32 * SCALE) as u32).into(),
@@ -162,8 +175,9 @@ fn main() {
         .insert_resource(Glitch { log: std::env::var_os("MBM_GLITCH_LOG").is_some(), last: vec![], shots: 0 })
         .add_audio_source::<Speaker>()
         .add_systems(Startup, setup)
-        .add_systems(FixedUpdate, step)
-        .add_systems(Update, (ui, show).chain())
+        .add_systems(FixedUpdate, step.run_if(resource_exists::<Front>))
+        .add_systems(Update, (ui, show).chain().run_if(resource_exists::<Front>))
+        .add_systems(Update, find_rom.run_if(resource_exists::<Finding>))
         .run();
 }
 
@@ -179,6 +193,7 @@ fn setup(
     mut speakers: ResMut<Assets<Speaker>>,
     settings: Res<Settings>,
     mut start: ResMut<Start>,
+    finding: Option<Res<Finding>>,
 ) {
     let buffer = Arc::new(Mutex::new(VecDeque::new()));
     let speaker = speakers.add(Speaker { buffer: buffer.clone(), mute: std::env::var_os("MBM_MUTE").is_some() });
@@ -198,9 +213,26 @@ fn setup(
         custom_size: Some(Vec2::new(render::WIDTH as f32 * SCALE, render::HEIGHT as f32 * SCALE)),
         ..default()
     });
+    let output = Output { screen, buffer };
+    if finding.is_none() {
+        commands.insert_resource(begin(&output, &settings, &mut start));
+    }
+    commands.insert_resource(output);
+}
+
+/// The game's picture and the audio output's buffer: made at startup, before the ROM
+/// may be in.
+#[derive(Resource)]
+struct Output {
+    screen: Handle<Image>,
+    buffer: Arc<Mutex<VecDeque<f32>>>,
+}
+
+/// The game, once the ROM is in (and hosting or joining, if the command line asked).
+fn begin(output: &Output, settings: &Settings, start: &mut Start) -> Front {
     let mut front = Front {
         game: boot(BOOT_SEED).expect("starting the game"),
-        screen,
+        screen: output.screen.clone(),
         linger: 0,
         menu: NetMenu::new(),
         menu_open: false,
@@ -211,7 +243,7 @@ fn setup(
         port: settings.port,
         delay: settings.delay,
         ticks: 0,
-        audio: Audio::new(buffer),
+        audio: Audio::new(output.buffer.clone()),
         title: TITLE.into(),
     };
     if let Some(action) = start.0.take() {
@@ -221,7 +253,104 @@ fn setup(
         }
         act(&mut front, action);
     }
-    commands.insert_resource(front);
+    front
+}
+
+/// Saves the ROM's path for the next run (unless it's the one saved already).
+fn remember(path: &std::path::Path) {
+    if locate::saved().as_deref() != std::path::absolute(path).ok().as_deref()
+        && let Err(e) = locate::save(path)
+    {
+        eprintln!("couldn't remember the ROM's path: {e}");
+    }
+}
+
+/// The ROM screen while it's up: what it shows, and the file picker while that's open.
+#[derive(Resource)]
+struct Finding {
+    screen: Locate,
+    /// What the file picker (on a thread of its own) chose, once it closes.
+    picker: Option<Mutex<std::sync::mpsc::Receiver<Option<PathBuf>>>>,
+    ticks: u32,
+}
+
+impl Finding {
+    fn new(screen: Locate) -> Finding {
+        Finding { screen, picker: None, ticks: 0 }
+    }
+}
+
+/// The ROM screen: keys, clicks, dropped files and the file picker, until a ROM works;
+/// then the game starts (and the ROM's path is saved).
+#[allow(clippy::too_many_arguments)]
+fn find_rom(
+    mut commands: Commands,
+    typed: MessageReader<KeyboardInput>,
+    mut drops: MessageReader<FileDragAndDrop>,
+    mouse: Res<ButtonInput<MouseButton>>,
+    windows: Query<&Window>,
+    mut finding: ResMut<Finding>,
+    output: Res<Output>,
+    settings: Res<Settings>,
+    mut start: ResMut<Start>,
+    mut images: ResMut<Assets<Image>>,
+    mut exit: MessageWriter<AppExit>,
+) {
+    let finding = &mut *finding;
+    finding.ticks += 1;
+    let mut actions = vec![];
+    let picked = finding.picker.as_ref().map(|p| p.lock().unwrap().try_recv());
+    if let Some(picked @ (Ok(_) | Err(std::sync::mpsc::TryRecvError::Disconnected))) = picked {
+        let chosen = picked.ok().flatten();
+        finding.picker = None;
+        finding.screen.browsing = false;
+        actions.extend(chosen.map(|p| finding.screen.dropped(&p)));
+    }
+    for drop in drops.read() {
+        if let FileDragAndDrop::DroppedFile { path_buf, .. } = drop {
+            actions.push(finding.screen.dropped(path_buf));
+        }
+    }
+    for input in inputs(typed, &mouse, &windows) {
+        actions.extend(finding.screen.input(input));
+    }
+    for action in actions {
+        match action {
+            locate::Action::Browse => {
+                let (tx, rx) = std::sync::mpsc::channel();
+                std::thread::spawn(move || {
+                    let chosen = rfd::FileDialog::new()
+                        .set_title("Your Mean Bean Machine ROM")
+                        .add_filter("Mega Drive ROM", &["bin", "md", "gen"])
+                        .add_filter("All files", &["*"])
+                        .pick_file();
+                    let _ = tx.send(chosen);
+                });
+                finding.picker = Some(Mutex::new(rx));
+                finding.screen.browsing = true;
+            }
+            locate::Action::Load(path) => match rom::install_from(&path) {
+                Ok(()) => {
+                    remember(&path);
+                    let mut front = begin(&output, &settings, &mut start);
+                    // (the key that started it isn't for the game)
+                    front.mute = true;
+                    commands.insert_resource(front);
+                    commands.remove_resource::<Finding>();
+                    return;
+                }
+                Err(e) => finding.screen.error = Some(e),
+            },
+            locate::Action::Quit => {
+                exit.write(AppExit::Success);
+            }
+        }
+    }
+    if let Some(mut image) = images.get_mut(&output.screen) {
+        let mut picture = vec![0; render::WIDTH * render::HEIGHT * 4];
+        finding.screen.draw(&mut picture, finding.ticks);
+        image.data = Some(picture);
+    }
 }
 
 /// The keyboard as player 1's pad (arrows, Z/X/C, Enter).
@@ -478,12 +607,37 @@ fn random_seed() -> u32 {
 
 /// Keys and clicks for the menus (and Esc: back, leave the network game, or quit).
 fn ui(
-    mut typed: MessageReader<KeyboardInput>,
+    typed: MessageReader<KeyboardInput>,
     mouse: Res<ButtonInput<MouseButton>>,
     windows: Query<&Window>,
     mut front: ResMut<Front>,
     mut exit: MessageWriter<AppExit>,
 ) {
+    let inputs = inputs(typed, &mouse, &windows);
+    let front = &mut *front;
+    if std::mem::take(&mut front.menu_fresh) {
+        return;
+    }
+    for input in inputs {
+        let playing = front.net.as_ref().is_some_and(|n| *n.session.state() == State::Playing);
+        if playing {
+            if input == Input::Back
+                && let Some(net) = front.net.as_mut()
+            {
+                net.session.leave("you left the game");
+            }
+        } else if front.menu_open {
+            if let Some(action) = front.menu.input(input) {
+                act(front, action);
+            }
+        } else if input == Input::Back {
+            exit.write(AppExit::Success);
+        }
+    }
+}
+
+/// This frame's keys and clicks, as the menus take them.
+fn inputs(mut typed: MessageReader<KeyboardInput>, mouse: &ButtonInput<MouseButton>, windows: &Query<&Window>) -> Vec<Input> {
     let mut inputs = vec![];
     for ev in typed.read().filter(|ev| ev.state == ButtonState::Pressed) {
         let input = match ev.key_code {
@@ -508,26 +662,7 @@ fn ui(
         let y = (at.y - (w.height() - render::HEIGHT as f32 * SCALE) / 2.0) / SCALE;
         inputs.push(Input::Click(x.floor() as i32, y.floor() as i32));
     }
-    let front = &mut *front;
-    if std::mem::take(&mut front.menu_fresh) {
-        return;
-    }
-    for input in inputs {
-        let playing = front.net.as_ref().is_some_and(|n| *n.session.state() == State::Playing);
-        if playing {
-            if input == Input::Back
-                && let Some(net) = front.net.as_mut()
-            {
-                net.session.leave("you left the game");
-            }
-        } else if front.menu_open {
-            if let Some(action) = front.menu.input(input) {
-                act(front, action);
-            }
-        } else if input == Input::Back {
-            exit.write(AppExit::Success);
-        }
-    }
+    inputs
 }
 
 /// Debugging: with `MBM_GLITCH_LOG` set, says what draws the score's font inside a
