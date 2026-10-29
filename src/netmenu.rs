@@ -288,7 +288,7 @@ impl Lobby {
             c.text(PANEL.x + PANEL.w - 24 - overlay::text_width(state, 1), y, state, color, 1);
         }
         c.text_centered(CX, PANEL.y + 108, "THE MATCH STARTS WHEN BOTH ARE READY.", overlay::WHITE, 1);
-        c.text_centered(CX, PANEL.y + PANEL.h - 14, "B (X OR K): NOT READY. ESC: LEAVE", overlay::GREY, 1);
+        c.text_centered(CX, PANEL.y + PANEL.h - 14, "B (X): NOT READY. ESC: LEAVE", overlay::GREY, 1);
     }
 }
 

@@ -5,7 +5,7 @@
 //! Usage: `bean-machine [path to the ROM]` (or set `MBM_ROM`). Without either, it uses
 //! the ROM from the last run, or asks for it on a screen of its own
 //! ([`bean_machine::locate`]) and remembers it from then on. Arrows move, Z/X/C are
-//! A/B/C (turn), Enter is Start. Esc quits. The sound is the ROM's own driver, ported;
+//! A/B/C (turn), Enter is Start: player 1's pad (no keys play player 2's). Esc quits. The sound is the ROM's own driver, ported;
 //! `MBM_MUTE=1` silences it. `MBM_CONSOLE=jp` / `eu` plays it on a Japanese / European
 //! console (this US cartridge's region lockout).
 //!
@@ -13,7 +13,7 @@
 //! machine (see [`bean_machine::netplay`] and [`bean_machine::netmenu`]). One player
 //! hosts, the other types the host's address and connects; both press START in the lobby
 //! and the match starts. Our own buttons count straight away, as offline: the other
-//! player's are guessed until they arrive (see [`bean_machine::rollback`]). Each side plays with either set of keys. From the command line:
+//! player's are guessed until they arrive (see [`bean_machine::rollback`]). From the command line:
 //!   `bean-machine [ROM] --host [PORT]` hosts straight away (port 7845 unless given);
 //!   `bean-machine [ROM] --join IP[:PORT]` joins straight away;
 //!   `--delay FRAMES` sets the host's input delay (3 unless given).
@@ -348,7 +348,7 @@ fn find_rom(
     }
 }
 
-/// The keyboard as player 1's pad (arrows, Z/X/C, Enter).
+/// The keyboard as player 1's pad (arrows, Z/X/C, Enter). Player 2's pad reads nothing.
 const P1_KEYS: [(KeyCode, u8); 8] = [
     (KeyCode::ArrowUp, pad::UP),
     (KeyCode::ArrowDown, pad::DOWN),
@@ -360,18 +360,6 @@ const P1_KEYS: [(KeyCode, u8); 8] = [
     (KeyCode::Enter, pad::START),
 ];
 
-/// And player 2's (WASD, J/K/L, Space), for 1P vs 2P.
-const P2_KEYS: [(KeyCode, u8); 8] = [
-    (KeyCode::KeyW, pad::UP),
-    (KeyCode::KeyS, pad::DOWN),
-    (KeyCode::KeyA, pad::LEFT),
-    (KeyCode::KeyD, pad::RIGHT),
-    (KeyCode::KeyK, pad::B),
-    (KeyCode::KeyL, pad::C),
-    (KeyCode::KeyJ, pad::A),
-    (KeyCode::Space, pad::START),
-];
-
 fn buttons(keys: &ButtonInput<KeyCode>, map: &[(KeyCode, u8)]) -> u8 {
     map.iter().filter(|(k, _)| keys.pressed(*k)).fold(0, |acc, (_, b)| acc | b)
 }
@@ -379,7 +367,7 @@ fn buttons(keys: &ButtonInput<KeyCode>, map: &[(KeyCode, u8)]) -> u8 {
 fn step(keys: Res<ButtonInput<KeyCode>>, mut front: ResMut<Front>, mut windows: Query<&mut Window>) {
     let front = &mut *front;
     front.ticks += 1;
-    let mut pads = [buttons(&keys, &P1_KEYS), buttons(&keys, &P2_KEYS)];
+    let mut pads = [buttons(&keys, &P1_KEYS), 0];
     if front.mute {
         front.mute = pads != [0, 0];
         pads = [0, 0];
@@ -394,7 +382,7 @@ fn step(keys: Res<ButtonInput<KeyCode>>, mut front: ResMut<Front>, mut windows: 
                     front.mute = true;
                     pads = [0, 0];
                 }
-                play_online(net, pads[0] | pads[1]);
+                play_online(net, pads[0]);
                 if let Some(play) = net.play.as_mut() {
                     front.audio.cues(&play.take_cues());
                 }
