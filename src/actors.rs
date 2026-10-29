@@ -1338,8 +1338,8 @@ pub struct Engine {
     /// `byte_FF0105` (the main menu's last mode) and the options (`$FFFCA4..`).
     pub last_mode: u8,
     pub options: [u8; 9],
-    /// Not in the ROM: the main menu gets a fifth line, NETWORK, below OPTIONS (the
-    /// front end draws its label), and choosing it sets `network_chosen` instead of
+    /// Not in the ROM: the main menu gets a fifth line, NETWORK, below OPTIONS (on a board
+    /// made taller for it), and choosing it sets `network_chosen` instead of
     /// leaving the menu. Off unless the front end turns it on.
     pub network_line: bool,
     pub network_chosen: bool,

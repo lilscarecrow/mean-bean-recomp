@@ -49,6 +49,9 @@ pub enum PanelCommand {
     VsLevel { player: u8, word: u16 },
     /// $93 (`SpecPlane93`): a side's bean count (exercise mode).
     Beans { player: u8, count: u16 },
+    /// Not in the ROM: the main menu's NETWORK line (and the lines beside it) with the
+    /// cursor on this line, for the front end's VRAM.
+    NetworkLine(u16),
 }
 
 /// `SpecPlane92`'s digits (5 x 7 words each, less $1E00) and where they go.
@@ -134,6 +137,10 @@ impl Engine {
                 PanelCommand::List(list) => {
                     let row = self.plane_row();
                     self.vdp_events.push(VdpEvent { at: self.plane_writes.len(), what: VdpOp::PlaneList { list, row } });
+                }
+                PanelCommand::NetworkLine(line) => {
+                    let row = self.plane_row();
+                    self.vdp_events.push(VdpEvent { at: self.plane_writes.len(), what: VdpOp::NetworkLine { line, row } });
                 }
                 PanelCommand::Time(secs) => {
                     self.result_line(0);

@@ -24,7 +24,6 @@ use bean_machine::game::{Game, Status};
 use bean_machine::locate::{self, Locate};
 use bean_machine::netmenu::{Action, Input, NetMenu, Screen};
 use bean_machine::netplay::{self, Session, State};
-use bean_machine::overlay::{self, Canvas};
 use bean_machine::rollback::{self, Rollback};
 use bean_machine::sound::Cue;
 use bevy::audio::AddAudioSource;
@@ -44,10 +43,6 @@ const SCALE: f32 = 3.0;
 /// what follows depends on when buttons are pressed, as on the console).
 const BOOT_SEED: u32 = 0x7FE7_B46A;
 const TITLE: &str = "Dr. Robotnik's Mean Bean Machine";
-
-/// Where the NETWORK line's label goes on the main menu: just right of the bean cursor
-/// on its fifth line (the cursor's sprite is at x $C0, y $D0 + line * $18).
-const NETWORK_LABEL: (i32, i32) = (0xC0 - 0x80 + 24, 0xD0 + 4 * 0x18 - 0x80 - 6);
 
 #[derive(Resource)]
 struct Front {
@@ -723,9 +718,6 @@ fn show(front: Res<Front>, mut images: ResMut<Assets<Image>>, mut glitch: ResMut
         }
     } else if front.menu_open {
         front.menu.draw(&mut picture, front.ticks);
-    } else if let Some(line) = front.game.main_menu_line() {
-        let color = if line == bean_machine::actors::NETWORK_LINE { overlay::YELLOW } else { overlay::WHITE };
-        Canvas(&mut picture).text(NETWORK_LABEL.0, NETWORK_LABEL.1, "NETWORK", color, 2);
     }
     if let Some(mut image) = images.get_mut(&front.screen) {
         image.data = Some(picture);

@@ -91,7 +91,7 @@ impl Engine {
         self.eni_queue_set(0, width, height, at);
     }
 
-    fn eni_queue_set(&mut self, i: usize, width: u16, height: u16, at: u16) {
+    pub(super) fn eni_queue_set(&mut self, i: usize, width: u16, height: u16, at: u16) {
         if i < self.eni_queue.len() {
             self.eni_queue[i] = (width, height, at);
         } else {

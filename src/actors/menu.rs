@@ -5,9 +5,11 @@
 //! cursor for 16 frames, then sets `level_mode` and `bytecode_flag` for
 //! `BC_GameStart` (scenario: 0 Start, 4 Continue to the password screen).
 //!
-//! Not in the ROM: with `network_line` on, the cursor goes one line further, to
-//! [`NETWORK_LINE`] (no plane list highlights it: the front end draws it), and START
-//! there sets `network_chosen` and leaves the menu as it is.
+//! Not in the ROM: with `network_line` on, the board is three tile rows taller (its
+//! lower part moves down, the vines on its sides grow to match) and has a fifth line,
+//! [`NETWORK_LINE`], drawn in the menu's own letters ([`PanelCommand::NetworkLine`],
+//! after each line's plane list; see [`crate::assets::network`]). The cursor goes down to it, and START there sets
+//! `network_chosen` and leaves the menu as it is.
 
 use super::*;
 use crate::rom;
@@ -47,6 +49,20 @@ pub const MENU_CLOUDS_CODE: u32 = 0xBDA4;
 pub const MAIN_MENU_MAPPINGS: u8 = 0x40;
 /// The extra line `network_line` adds (after OPTIONS, line 3).
 pub const NETWORK_LINE: u16 = 4;
+/// The main menu's board (`MAIN_MENU_MAP`): $22 x $14 words, from plane row 3, column 3.
+const BOARD_W: usize = 0x22;
+const BOARD_H: usize = 0x14;
+/// With the NETWORK line: the rows added, and the board's rows from the first one that
+/// moves down (OPTIONS, the bush beside it and the bottom edge; plane row 18).
+const ADDED_ROWS: usize = 3;
+const MOVED_FROM: usize = 15;
+/// Board columns: the vines on the left (plane columns 3-7) and the right (33-36);
+/// the lines' text from column 5 (plane column 8), OPTIONS 14 wide.
+const LEFT_VINES: std::ops::Range<usize> = 0..5;
+const RIGHT_VINES: std::ops::Range<usize> = 30..BOARD_W;
+const TEXT: std::ops::Range<usize> = 5..19;
+/// The board's empty inside.
+const BLANK: u16 = 0xE190;
 
 const MAIN_MENU_MAP: u32 = 0x6C7C2;
 const SCENARIO_MENU_MAP: u32 = 0x6C872;
@@ -67,7 +83,12 @@ pub const DEFAULT_OPTIONS: [u8; 9] = [1, 2, 2, 1, 2, 2, 1, 2, 0];
 impl Engine {
     pub(super) fn run_menu_routine(&mut self, at: u32) -> bool {
         match at {
-            0xF6E6 => self.eni_dec_safe(MAIN_MENU_MAP, 0xE190, 0x21, 0x13, 0xC306),
+            0xF6E6 => {
+                self.eni_dec_safe(MAIN_MENU_MAP, 0xE190, 0x21, 0x13, 0xC306);
+                if self.network_line {
+                    self.stretch_main_menu();
+                }
+            }
             0xF702 => self.eni_dec_safe(SCENARIO_MENU_MAP, 0xE190, 0x19, 0x0B, 0xC65E),
             0xF7EC | 0xF7F6 | 0xF800 | 0xF80A => {
                 let to = 0xE000 + (at - 0xF7EC) as u16 / 10 * 0x40;
@@ -80,6 +101,37 @@ impl Engine {
             _ => return false,
         }
         true
+    }
+
+    /// Not in the ROM: makes room on the decoded board for the NETWORK line, under
+    /// OPTIONS. OPTIONS, the bush beside it and the bottom edge move down three rows; the
+    /// vines on the sides repeat the three rows above to fill the gap; the gap's inside
+    /// is left empty, but for OPTIONS (which stays put, where its plane list draws it).
+    fn stretch_main_menu(&mut self) {
+        let old: Vec<u16> = self.eni_buffer[..BOARD_W * BOARD_H].to_vec();
+        let at = |r: usize, c: usize| old[r * BOARD_W + c];
+        for r in 0..BOARD_H + ADDED_ROWS {
+            for c in 0..BOARD_W {
+                let w = if r < MOVED_FROM {
+                    at(r, c)
+                } else if r < MOVED_FROM + ADDED_ROWS {
+                    if LEFT_VINES.contains(&c) || RIGHT_VINES.contains(&c) {
+                        at(r - ADDED_ROWS, c)
+                    } else if TEXT.contains(&c) {
+                        at(r, c)
+                    } else {
+                        BLANK
+                    }
+                } else if r < MOVED_FROM + 2 * ADDED_ROWS && TEXT.contains(&c) {
+                    // (where NETWORK goes)
+                    BLANK
+                } else {
+                    at(r - ADDED_ROWS, c)
+                };
+                self.eni_buffer[r * BOARD_W + c] = w;
+            }
+        }
+        self.eni_queue_set(0, BOARD_W as u16 - 1, (BOARD_H + ADDED_ROWS) as u16 - 1, 0xC306);
     }
 
     /// `loc_BA3C`.
@@ -110,6 +162,9 @@ impl Engine {
             0 => {
                 m.count = 0x280;
                 self.queue_panel(PanelCommand::List(0x0C + m.line));
+                if self.network_line {
+                    self.queue_panel(PanelCommand::NetworkLine(m.line));
+                }
                 m.phase = 1;
             }
             1 => {
@@ -130,6 +185,9 @@ impl Engine {
                         self.play_sample(0x42);
                     }
                     self.queue_panel(PanelCommand::List(0x0C + m.line));
+                    if self.network_line {
+                        self.queue_panel(PanelCommand::NetworkLine(m.line));
+                    }
                 } else if press & 2 != 0 {
                     let last = if self.network_line { NETWORK_LINE } else { 3 };
                     if m.line < last {
@@ -138,6 +196,9 @@ impl Engine {
                     }
                     if m.line < NETWORK_LINE {
                         self.queue_panel(PanelCommand::List(0x0C + m.line));
+                    }
+                    if self.network_line {
+                        self.queue_panel(PanelCommand::NetworkLine(m.line));
                     }
                 }
             }
@@ -187,7 +248,9 @@ impl Engine {
                 return None;
             }
             4 => {
-                for i in 0..0xB8 {
+                // (the taller board's bottom edge goes too)
+                let lines = if self.network_line { 0xB8 + ADDED_ROWS * 8 } else { 0xB8 };
+                for i in 0..lines {
                     let w = &mut self.hscroll[0x20 + i * 2];
                     *w = w.wrapping_sub(8);
                 }

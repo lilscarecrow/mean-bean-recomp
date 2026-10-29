@@ -36,6 +36,8 @@ pub enum VdpOp {
     RomCopy { vram: u16, from: u32, len: u16 },
     /// Words written straight to VRAM (pattern pixels).
     Words { at: u16, words: Vec<u16> },
+    /// Not in the ROM: the main menu's NETWORK line ([`crate::assets::network`]).
+    NetworkLine { line: u16, row: u16 },
 }
 
 /// Bytecode addresses (`Game_Bytecode`): the stage, the scenario's next opponent.

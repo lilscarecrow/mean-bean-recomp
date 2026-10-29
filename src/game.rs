@@ -6,7 +6,7 @@
 //! palettes and scroll the engine keeps.
 
 use super::actors::{Actor, Engine, Inputs, Unported, VdpOp, BC_LEVEL, SLOTS};
-use super::assets::{planes, screen, sprites, AssetSource, Rom, RomAssets, Vram};
+use super::assets::{network, planes, screen, sprites, AssetSource, Rom, RomAssets, Vram};
 use super::pad::{self, Pad};
 use super::render::{self, Layout};
 use super::rng::Rng;
@@ -27,6 +27,7 @@ pub fn apply_vdp(e: &mut Engine, vram: &mut Vram, boxes: &mut Vec<Vec<u16>>, rom
             VdpOp::Sorcery { vram: at, art } => vram.load(at, &src.sorcery(art)?),
             VdpOp::Nemesis { vram: at, art } => vram.load(at, &src.nemesis(art)?),
             VdpOp::PlaneList { list, row } => planes::run_list_rows(rom, vram, list, row)?,
+            VdpOp::NetworkLine { line, row } => network::draw(rom, vram, line, row)?,
             VdpOp::Font { vram: at, art } => {
                 let mut font = src.nemesis(art)?;
                 font.resize(0x1180, 0);
